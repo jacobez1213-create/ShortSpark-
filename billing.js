@@ -1,72 +1,61 @@
 (() => {
+  const isPlan = plan => plan === "creator" || plan === "pro";
+
   function setError(message) {
     const box = document.getElementById("billingError");
     if (box) {
       box.hidden = false;
       box.textContent = message;
+      box.scrollIntoView({ behavior: "smooth", block: "nearest" });
     } else {
       alert(message);
     }
   }
 
-  async function enhanceCheckout(link) {
-    const href = link.getAttribute("href");
-    if (!href || link.dataset.busy === "1") return;
-
-    // The plain /subscribe/:plan link remains the fallback. JS only adds
-    // a friendlier loading state and an early auth check.
-    const plan = link.dataset.plan;
-    if (plan !== "creator" && plan !== "pro") return;
-
-    link.dataset.busy = "1";
-    link.setAttribute("aria-busy", "true");
-    const original = link.textContent;
-    link.textContent = "Opening checkout…";
+  async function checkout(plan, fallbackHref) {
+    if (!isPlan(plan)) return;
+    const controls = [...document.querySelectorAll(`[data-plan="${plan}"]`)];
+    controls.forEach(c => {
+      c.dataset.busy = "1";
+      c.setAttribute("aria-busy", "true");
+      c.dataset.original = c.textContent;
+      c.textContent = "Opening checkout…";
+      if ("disabled" in c) c.disabled = true;
+    });
 
     try {
-      const me = await fetch("/api/auth/me", {
-        credentials: "include",
-        cache: "no-store"
-      });
-
+      const me = await fetch("/api/auth/me", { credentials: "include", cache: "no-store" });
       if (me.status === 401) {
-        window.location.assign(`/account?next=${encodeURIComponent(plan)}`);
+        location.assign(`/account?next=${encodeURIComponent(plan)}`);
         return;
       }
+      if (!me.ok) throw new Error("We couldn't verify your account. Please sign in again.");
 
-      if (!me.ok) {
-        // Let the normal GET route be the final authority.
-        window.location.assign(href);
-        return;
-      }
-
-      // Use the same first-party GET route. This avoids fragile client-side
-      // JSON orchestration and works with browser navigation semantics.
-      window.location.assign(href);
+      // Primary path: normal browser navigation to the first-party checkout route.
+      // This also avoids client-side JSON/redirect edge cases and works with ad/privacy extensions.
+      location.assign(fallbackHref || `/subscribe/${plan}`);
     } catch (err) {
-      // Absolute fallback: plain browser navigation to /subscribe/:plan.
-      window.location.assign(href);
-    } finally {
-      link.dataset.busy = "0";
-      link.removeAttribute("aria-busy");
-      link.textContent = original;
+      // Last-resort navigation still works even when fetch is blocked.
+      location.assign(fallbackHref || `/subscribe/${plan}`);
     }
   }
 
   function init() {
-    document.querySelectorAll('a[data-plan][href^="/subscribe/"]').forEach(link => {
-      link.addEventListener("click", event => {
-        // Keep middle-click / Ctrl-click / Shift-click native.
+    document.querySelectorAll('[data-plan]').forEach(control => {
+      const plan = control.dataset.plan;
+      if (!isPlan(plan) || control.dataset.checkoutBound === "1") return;
+      control.dataset.checkoutBound = "1";
+
+      // Convert accidental buttons to a working client-side action.
+      control.addEventListener("click", event => {
         if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
         event.preventDefault();
-        enhanceCheckout(link);
+        event.stopPropagation();
+        checkout(plan, control.getAttribute("href") || `/subscribe/${plan}`);
       });
     });
   }
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", init, { once: true });
-  } else {
-    init();
-  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init, { once: true });
+  else init();
 })();

@@ -116,3 +116,12 @@ The Inworld Realtime TTS 1.5 Mini model supports expressive audio markups such a
 Stripe plan controls are now real first-party links to `/subscribe/creator` and `/subscribe/pro`. JavaScript only enhances the experience, so the checkout buttons still work if frontend JS fails or a privacy extension blocks a script.
 
 AI Support also has a first-party `/support` page. The floating support control opens the widget when JavaScript is available and naturally falls back to the support page if it is not.
+
+
+## v3.3 Stripe + AI support connection fix
+
+### Stripe
+Creator and Pro controls now use first-party `/subscribe/creator` and `/subscribe/pro` links even if JavaScript is unavailable. The account page no longer relies on a button-only click handler. The server also reports clear setup errors when the Stripe secret key or price IDs are missing.
+
+### AI support
+The support agent uses the OpenAI Responses API with `gpt-6-luna` by default for low-cost, high-volume support. Add `OPENAI_API_KEY` to Render Environment Variables to enable the live AI agent. The key is never sent to the browser.

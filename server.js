@@ -25,7 +25,7 @@ const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SEC
 const openai = process.env.OPENAI_API_KEY
   ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
   : null;
-const SUPPORT_MODEL = process.env.SUPPORT_MODEL || "gpt-5.5";
+const SUPPORT_MODEL = process.env.SUPPORT_MODEL || "gpt-6-luna";
 const SUPPORT_MAX_MESSAGES = 8;
 const SUPPORT_SYSTEM_PROMPT = `You are ShortSpark's friendly AI customer-support agent.
 You help customers use the ShortSpark website, understand plans, create better prompts, generate AI videos, and troubleshoot common issues.
@@ -560,6 +560,18 @@ app.get("/api/health", async (req, res) => {
 });
 
 
+
+app.get("/api/stripe-status", async (req, res) => {
+  res.json({
+    configured: !!stripe,
+    livemode: process.env.STRIPE_SECRET_KEY ? process.env.STRIPE_SECRET_KEY.startsWith("sk_live_") : false,
+    creatorPriceConfigured: typeof priceIds.creator === "string" && priceIds.creator.startsWith("price_"),
+    proPriceConfigured: typeof priceIds.pro === "string" && priceIds.pro.startsWith("price_"),
+    supportConfigured: !!openai,
+    videoConfigured: !!replicate
+  });
+});
+
 app.get("/subscribe/:plan", rateLimit("subscribe-redirect", {
   windowMs: 10 * 60 * 1000,
   max: 8,
@@ -572,8 +584,11 @@ app.get("/subscribe/:plan", rateLimit("subscribe-redirect", {
   if (!user) return res.redirect(`/account?next=${encodeURIComponent(plan)}`);
 
   const price = priceIds[plan];
-  if (!stripe || !price) {
-    return res.status(503).send("Stripe checkout is not configured for this plan yet.");
+  if (!stripe) {
+    return res.status(503).send("Stripe is not connected. Add STRIPE_SECRET_KEY in Render → Environment.");
+  }
+  if (!price || !price.startsWith("price_")) {
+    return res.status(503).send(`The ${plan} Stripe Price ID is missing. Add the correct ${plan} price_ ID in Render → Environment.`);
   }
 
   try {
@@ -583,23 +598,27 @@ app.get("/subscribe/:plan", rateLimit("subscribe-redirect", {
       client_reference_id: user.id,
       customer_email: user.email,
       metadata: { userId: user.id, plan },
+      subscription_data: { metadata: { userId: user.id, plan } },
       line_items: [{ price, quantity: 1 }],
       success_url: `${base}/account?checkout=success`,
       cancel_url: `${base}/account?checkout=cancelled`,
       allow_promotion_codes: true
-    }, { idempotencyKey: `get_checkout_${user.id}_${plan}_${Date.now()}` });
+    });
 
+    if (!session.url) throw new Error("Stripe returned no Checkout URL.");
     return res.redirect(303, session.url);
   } catch (err) {
     console.error("GET checkout redirect error:", err);
-    return res.status(502).send("Stripe Checkout could not be opened. Please try again.");
+    const message = String(err?.message || "unknown Stripe error").slice(0, 300);
+    return res.status(502).send(`Stripe Checkout could not be opened: ${message}`);
   }
 });
 
 app.post("/api/create-checkout-session", sameOrigin, requireUser, rateLimit("checkout", { windowMs: 10 * 60 * 1000, max: 8, keyFn: req => req.user.id }), async (req, res) => {
   const plan = req.body?.plan;
   const price = priceIds[plan];
-  if (!stripe || !price) return res.status(503).json({ error: "Stripe is not configured. Check Render environment variables." });
+  if (!stripe) return res.status(503).json({ error: "Stripe is not connected. Add STRIPE_SECRET_KEY in Render → Environment." });
+  if (!price || !price.startsWith("price_")) return res.status(503).json({ error: `The ${plan} Stripe Price ID is missing or invalid.` });
   if (!['creator','pro'].includes(plan)) return res.status(400).json({ error: "Invalid plan." });
   try {
     const base = `${req.protocol}://${req.get("host")}`;
@@ -612,7 +631,7 @@ app.post("/api/create-checkout-session", sameOrigin, requireUser, rateLimit("che
       success_url: `${base}/account?checkout=success`,
       cancel_url: `${base}/account?checkout=cancelled`,
       allow_promotion_codes: true
-    }, { idempotencyKey: `checkout_${req.user.id}_${crypto.randomUUID()}` });
+    }, { idempotencyKey: `checkout_${req.user.id}_${plan}_${Date.now()}_${crypto.randomBytes(4).toString("hex")}` });
     res.json({ url: session.url });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message || "Could not create Stripe Checkout session." }); }
 });
@@ -651,7 +670,7 @@ app.post("/api/support/chat",
       if (!openai) {
         return res.json({
           source: "faq",
-          answer: "AI support isn't connected on this deployment yet. For now: Free includes 1 video/day; Creator is $8.99/month for 10 videos/month; Pro is $15.99/month for 24 videos/month. For account or payment help, sign in and check /account."
+          answer: "AI support isn't connected yet. The site is running the built-in FAQ fallback. The owner needs to add OPENAI_API_KEY in Render → Environment to turn on the live AI support agent. Current plans: Free 1 video/day, Creator $8.99/month for 10 videos/month, Pro $15.99/month for 24 videos/month."
         });
       }
 
