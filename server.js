@@ -259,14 +259,15 @@ async function downloadTo(url, file) {
   if (!response.ok) throw new Error(`Could not download generated video (${response.status}).`);
   await fs.writeFile(file, Buffer.from(await response.arrayBuffer()));
 }
-function buildScenes(idea, style, aspectRatio) {
+function buildScenes(idea, style, aspectRatio, sceneCount = 3) {
   const pace = { "Fast & viral":"fast pacing, punchy visual changes, energetic camera motion", "Storytelling":"cinematic storytelling, clear visual progression, dramatic pacing", "Funny":"playful timing, comedic visual beats, expressive reactions", "Mysterious":"dark suspense, eerie lighting, slow reveals, rising tension", "Educational":"clean visual explanation, crisp compositions, surprising details" }[style] || "cinematic short-form storytelling";
   const common = `Short-form ${aspectRatio} video, ${pace}. High visual quality, realistic motion, coherent subject continuity, no logos or watermarks. NO SPOKEN DIALOGUE and NO MUSIC; visuals only. Leave clean space for narration captions.`;
-  return [
+  const prompts = [
     `${common} Scene 1 — HOOK. Immediately visualize the central idea: ${idea}. Create a strong first-second visual surprise.`,
     `${common} Scene 2 — ESCALATION. Continue the same story about ${idea}. Reveal a stronger detail, change the setting or camera angle, and build curiosity.`,
     `${common} Scene 3 — PAYOFF. Deliver the strongest visual payoff connected to ${idea}. End with a memorable final shot that invites a part two.`
   ];
+  return prompts.slice(0, sceneCount);
 }
 
 // Stripe webhooks must be parsed as raw bytes before express.json().
@@ -423,37 +424,72 @@ app.get("/api/admin/overview", requireAdmin, async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: "Stripe dashboard data could not be loaded." }); }
 });
 
-async function generateJob(jobId, idea, style, aspectRatio) {
+async function generateJob(jobId, idea, style, aspectRatio, plan) {
   const job = jobs.get(jobId); if (!job) return;
+  const isFree = plan === "free";
+  const sceneCount = isFree ? 1 : 3;
+  const clipDuration = 10;
+  const totalDuration = isFree ? 10 : 30;
+  const providerResolution = "480p"; // current Seedance minimum supported target resolution
+  const outputWidth = aspectRatio === "9:16" ? (isFree ? 360 : 480) : (isFree ? 640 : 854);
+  const outputHeight = aspectRatio === "9:16" ? (isFree ? 640 : 854) : (isFree ? 360 : 480);
   try {
     if (!replicate) throw new Error("AI video is not configured. Add REPLICATE_API_TOKEN to Render Environment Variables.");
     if (db) await db.query("UPDATE video_generations SET status='generating' WHERE job_id=$1", [jobId]);
-    job.status = "generating"; job.progress = 5; job.message = "Creating three low-cost 480p scenes…";
-    const prompts = buildScenes(idea, style, aspectRatio), outputs = [];
+    job.status = "generating";
+    job.progress = 5;
+    job.message = isFree ? "Creating your 10-second free preview…" : "Creating three 10-second scenes…";
+    const prompts = buildScenes(idea, style, aspectRatio, sceneCount), outputs = [];
     for (let i = 0; i < prompts.length; i++) {
-      job.progress = 8 + i * 18; job.message = `Generating scene ${i + 1} of 3 at 480p…`;
+      job.progress = 8 + Math.floor(i * (48 / Math.max(1, prompts.length - 1 || 1)));
+      job.message = isFree ? `Generating your free 10-second scene at 480p…` : `Generating scene ${i + 1} of 3 at 480p…`;
       const output = await replicate.run(VIDEO_MODEL, { input: {
-        prompt: prompts[i], duration: 10, resolution: "480p", aspect_ratio: aspectRatio,
+        prompt: prompts[i], duration: clipDuration, resolution: providerResolution, aspect_ratio: aspectRatio,
         fps: 24, camera_fixed: false, generate_audio: false
       }});
       outputs.push(outputUrl(output));
     }
     job.progress = 62; job.message = "Generating low-cost voice narration…";
-    const narration = `Stop scrolling. You need to hear this about ${idea}. At first, it sounds impossible. But then one detail changes everything. And that's the part nobody sees coming. Would you have noticed it?`;
+    const narration = isFree
+      ? `Here is the quick version about ${idea}. Watch what happens next.`
+      : `Stop scrolling. You need to hear this about ${idea}. At first, it sounds impossible. But then one detail changes everything. And that's the part nobody sees coming. Would you have noticed it?`;
     const narrationUrl = await generateNarration(narration);
 
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "shortspark-")), clipPaths = [];
     for (let i = 0; i < outputs.length; i++) {
-      const clip = path.join(dir, `clip-${i + 1}.mp4`); job.progress = 66 + i * 4; job.message = `Preparing scene ${i + 1}…`; await downloadTo(outputs[i], clip); clipPaths.push(clip);
+      const clip = path.join(dir, `clip-${i + 1}.mp4`);
+      job.progress = 66 + i * 5;
+      job.message = `Preparing scene ${i + 1}…`;
+      await downloadTo(outputs[i], clip); clipPaths.push(clip);
     }
     const audioPath = path.join(dir, "narration.mp3"); await downloadTo(narrationUrl, audioPath);
     const listPath = path.join(dir, "concat.txt");
-    await fs.writeFile(listPath, clipPaths.map(p => `file '${p.replaceAll("'", "'\''")}'`).join("\n"), "utf8");
-    const finalPath = path.join(dir, "shortspark-short.mp4"); job.progress = 86; job.message = "Joining scenes and narration into one Short…";
-    await ffmpegRun(["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-i", audioPath, "-filter_complex", "[0:v]scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2,format=yuv420p[v]", "-map", "[v]", "-map", "1:a", "-t", "30", "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", finalPath]);
+    const concatLines = clipPaths.map(p => `file '${p.replaceAll("'", "'\''")}'`).join("\n");
+    await fs.writeFile(listPath, concatLines, "utf8");
+    const finalPath = path.join(dir, "shortspark-short.mp4");
+    job.progress = 86; job.message = isFree ? "Finishing your 10-second free video…" : "Joining scenes and narration into your 30-second Short…";
+    const scaleFilter = `[0:v]scale=${outputWidth}:${outputHeight}:force_original_aspect_ratio=decrease,pad=${outputWidth}:${outputHeight}:(ow-iw)/2:(oh-ih)/2,format=yuv420p[v]`;
+    await ffmpegRun(["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-i", audioPath, "-filter_complex", scaleFilter, "-map", "[v]", "-map", "1:a", "-t", String(totalDuration), "-c:v", "libx264", "-preset", "veryfast", "-crf", isFree ? "29" : "26", "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", finalPath]);
     const captionsPath = path.join(dir, "captions.srt");
-    await fs.writeFile(captionsPath, `1\n00:00:00,000 --> 00:00:07,000\nStop scrolling. You need to hear this about ${idea}.\n\n2\n00:00:07,000 --> 00:00:18,000\nAt first, it sounds impossible. But then one detail changes everything.\n\n3\n00:00:18,000 --> 00:00:30,000\nAnd that's the part nobody sees coming. Would you have noticed it?\n`, "utf8");
-    Object.assign(job, { dir, finalPath, captionsPath, progress: 100, message: "Your 30-second Short is ready.", status: "completed" });
+    const captions = isFree
+      ? `1
+00:00:00,000 --> 00:00:10,000
+Here is the quick version about ${idea}. Watch what happens next.
+`
+      : `1
+00:00:00,000 --> 00:00:07,000
+Stop scrolling. You need to hear this about ${idea}.
+
+2
+00:00:07,000 --> 00:00:18,000
+At first, it sounds impossible. But then one detail changes everything.
+
+3
+00:00:18,000 --> 00:00:30,000
+And that's the part nobody sees coming. Would you have noticed it?
+`;
+    await fs.writeFile(captionsPath, captions, "utf8");
+    Object.assign(job, { dir, finalPath, captionsPath, progress: 100, message: isFree ? "Your 10-second free Short is ready." : "Your 30-second Short is ready.", status: "completed", durationSeconds: totalDuration, outputWidth, outputHeight, plan });
     if (db) await db.query("UPDATE video_generations SET status='completed', completed_at=NOW() WHERE job_id=$1", [jobId]);
   } catch (error) {
     console.error(`Video job ${jobId} failed`, error); Object.assign(job, { status: "failed", progress: 0, error: error.message || "Video generation failed." });
@@ -471,8 +507,8 @@ app.post("/api/generate-video", sameOrigin, requireUser, rateLimit("video", { wi
   try {
     const reservation = await reserveGeneration(req.user, idea, style, aspectRatio);
     if (!reservation.ok) return res.status(429).json({ error: `You've used all ${reservation.usage.limit} video generation(s) for this ${reservation.usage.period}.`, usage: reservation.usage });
-    jobs.set(reservation.jobId, { status: "queued", progress: 2, message: "Queued…", createdAt: Date.now(), userId: req.user.id });
-    generateJob(reservation.jobId, idea, style, aspectRatio);
+    jobs.set(reservation.jobId, { status: "queued", progress: 2, message: "Queued…", createdAt: Date.now(), userId: req.user.id, plan: reservation.usage.plan });
+    generateJob(reservation.jobId, idea, style, aspectRatio, reservation.usage.plan);
     res.status(202).json({ jobId: reservation.jobId, usage: reservation.usage });
   } catch (err) { console.error(err); res.status(500).json({ error: "Could not start video generation." }); }
 });
