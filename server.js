@@ -325,7 +325,7 @@ app.post("/api/webhook", express.raw({ type: "application/json" }), async (req, 
 
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(express.json({ limit: "32kb" }));
-app.use(express.static(path.join(__dirname, "public"), { dotfiles: "deny", index: false }));
+app.use(express.static(__dirname, { dotfiles: "deny", index: false }));
 
 app.post("/api/auth/signup", sameOrigin, rateLimit("signup", { windowMs: 15 * 60 * 1000, max: 5 }), async (req, res) => {
   try {
@@ -529,8 +529,8 @@ setInterval(async () => {
   if (db) { try { await db.query("DELETE FROM sessions WHERE expires_at<NOW()") } catch {} }
 }, 10 * 60 * 1000).unref();
 
-app.get("/admin", (req, res) => res.sendFile(path.join(__dirname, "public", "admin.html")));
-app.get("/account", (req, res) => res.sendFile(path.join(__dirname, "public", "account.html")));
-app.get("/{*splat}", (req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
+app.get("/admin", (req, res) => res.sendFile(path.join(__dirname, "admin.html")));
+app.get("/account", (req, res) => res.sendFile(path.join(__dirname, "account.html")));
+app.get("/{*splat}", (req, res) => res.sendFile(path.join(__dirname, "index.html")));
 
 initDb().then(() => app.listen(PORT, "0.0.0.0", () => console.log(`ShortSpark running on port ${PORT}`))).catch(err => { console.error("Database initialization failed", err); process.exit(1); });
