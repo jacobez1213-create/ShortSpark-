@@ -45,66 +45,122 @@ const priceIds = { creator: process.env.STRIPE_PRICE_CREATOR, pro: process.env.S
 
 const stripePriceCache = new Map();
 
-function stripeProductNameForPlan(plan) {
-  return plan === "creator" ? "ShortSpark Creator" : plan === "pro" ? "ShortSpark Pro" : null;
-}
+const PLAN_CONFIG = {
+  creator: {
+    productName: "ShortSpark Creator",
+    amount: 899,
+    lookupKey: "shortspark_creator_monthly_v1"
+  },
+  pro: {
+    productName: "ShortSpark Pro",
+    amount: 1599,
+    lookupKey: "shortspark_pro_monthly_v1"
+  }
+};
 
 async function resolveStripePriceId(plan) {
   if (!stripe) return null;
-  if (!["creator", "pro"].includes(plan)) return null;
+  const cfg = PLAN_CONFIG[plan];
+  if (!cfg) return null;
 
-  const now = Date.now();
   const cached = stripePriceCache.get(plan);
-  if (cached && cached.expiresAt > now) return cached.id;
+  if (cached && cached.expiresAt > Date.now()) return cached.id;
 
-  const configured = priceIds[plan];
+  // 1) Prefer a lookup key created/managed by ShortSpark.
+  try {
+    const byLookup = await stripe.prices.list({
+      active: true,
+      type: "recurring",
+      lookup_keys: [cfg.lookupKey],
+      limit: 1
+    });
+    const exactLookup = byLookup.data.find(p =>
+      p.currency === "usd" &&
+      p.unit_amount === cfg.amount &&
+      p.recurring?.interval === "month"
+    );
+    if (exactLookup) {
+      stripePriceCache.set(plan, { id: exactLookup.id, expiresAt: Date.now() + 10 * 60 * 1000 });
+      return exactLookup.id;
+    }
+  } catch (err) {
+    console.warn(`Lookup-key price search failed for ${plan}:`, err.message);
+  }
 
-  // First use the configured Price ID when it is valid in the current
-  // Stripe account/mode and is an active monthly recurring price.
-  if (configured && configured.startsWith("price_")) {
+  // 2) Find the exact product by name in the current Stripe account/mode.
+  let product = null;
+  try {
+    const products = await stripe.products.list({ active: true, limit: 100 });
+    product = products.data.find(p =>
+      String(p.name || "").trim().toLowerCase() === cfg.productName.toLowerCase()
+    );
+  } catch (err) {
+    throw new Error(`Could not read Stripe products: ${err.message}`);
+  }
+
+  // 3) If the product is missing, create it in the current Stripe mode.
+  // This fixes a half-configured account without exposing secrets to the client.
+  if (!product) {
     try {
-      const price = await stripe.prices.retrieve(configured);
-      const valid = price.active !== false &&
-        price.type === "recurring" &&
-        price.recurring?.interval === "month";
-      if (valid) {
-        stripePriceCache.set(plan, { id: price.id, expiresAt: now + 5 * 60 * 1000 });
-        return price.id;
-      }
-      console.warn(`Configured ${plan} price ${configured} is not an active monthly recurring price; falling back to product lookup.`);
+      product = await stripe.products.create({
+        name: cfg.productName,
+        metadata: { shortspark_plan: plan, managed_by: "shortspark" }
+      });
+      console.log(`Created missing Stripe product: ${product.id} (${cfg.productName}).`);
     } catch (err) {
-      console.warn(`Configured ${plan} price ${configured} could not be retrieved; falling back to product lookup.`, err.message);
+      throw new Error(`Could not create ${cfg.productName}: ${err.message}`);
     }
   }
 
-  // Robust fallback: find the active monthly recurring price attached to
-  // the named ShortSpark product in the SAME Stripe mode as the secret key.
-  const productName = stripeProductNameForPlan(plan);
-  const prices = await stripe.prices.list({
-    active: true,
-    type: "recurring",
-    limit: 100,
-    expand: ["data.product"]
-  });
-
-  const matches = prices.data.filter(price => {
-    const product = price.product;
-    const name = typeof product === "string" ? "" : String(product?.name || "");
-    return name.trim().toLowerCase() === productName.toLowerCase() &&
-      price.recurring?.interval === "month";
-  }).sort((a, b) => b.created - a.created);
-
-  const resolved = matches[0];
-  if (!resolved) {
-    throw new Error(
-      `No active monthly Stripe price was found for "${productName}" in the current Stripe mode. ` +
-      `Create that product/price in the same Test or Live mode as STRIPE_SECRET_KEY.`
+  // 4) Find an exact $8.99 / $15.99 monthly USD price for that product.
+  let exact = null;
+  try {
+    const prices = await stripe.prices.list({
+      product: product.id,
+      active: true,
+      type: "recurring",
+      limit: 100
+    });
+    exact = prices.data.find(p =>
+      p.currency === "usd" &&
+      p.unit_amount === cfg.amount &&
+      p.recurring?.interval === "month"
     );
+  } catch (err) {
+    throw new Error(`Could not read prices for ${cfg.productName}: ${err.message}`);
   }
 
-  stripePriceCache.set(plan, { id: resolved.id, expiresAt: now + 5 * 60 * 1000 });
-  console.log(`Resolved ${plan} price automatically to ${resolved.id} from ${productName}.`);
-  return resolved.id;
+  // 5) If the exact price does not exist, create it.
+  if (!exact) {
+    try {
+      exact = await stripe.prices.create({
+        product: product.id,
+        currency: "usd",
+        unit_amount: cfg.amount,
+        recurring: { interval: "month" },
+        lookup_key: cfg.lookupKey,
+        metadata: { shortspark_plan: plan, managed_by: "shortspark" }
+      });
+      console.log(`Created exact Stripe price ${exact.id} for ${cfg.productName} at $${(cfg.amount / 100).toFixed(2)}/month.`);
+    } catch (err) {
+      throw new Error(
+        `Could not create the exact ${cfg.productName} price of $${(cfg.amount / 100).toFixed(2)}/month: ${err.message}`
+      );
+    }
+  } else {
+    // Best effort: add the lookup key to an existing exact price.
+    if (!exact.lookup_key) {
+      try {
+        exact = await stripe.prices.update(exact.id, { lookup_key: cfg.lookupKey });
+      } catch (err) {
+        console.warn(`Could not add lookup key to ${exact.id}:`, err.message);
+      }
+    }
+  }
+
+  stripePriceCache.set(plan, { id: exact.id, expiresAt: Date.now() + 10 * 60 * 1000 });
+  console.log(`Resolved ${plan} checkout price to ${exact.id} at $${(cfg.amount / 100).toFixed(2)}/month.`);
+  return exact.id;
 }
 
 const VIDEO_MODEL = "wan-video/wan-2.2-5b-fast";
@@ -640,7 +696,9 @@ app.get("/api/stripe-status", async (req, res) => {
     creatorConfiguredValue: priceIds.creator ? "[set]" : "[missing]",
     proConfiguredValue: priceIds.pro ? "[set]" : "[missing]",
     supportConfigured: !!openai,
-    videoConfigured: !!replicate
+    videoConfigured: !!replicate,
+    intendedCreatorMonthlyUsd: 8.99,
+    intendedProMonthlyUsd: 15.99
   });
 });
 
@@ -708,6 +766,13 @@ app.post("/api/create-checkout-session", sameOrigin, requireUser, rateLimit("che
   }
 });
 
+
+app.get("/api/support-status", (req, res) => {
+  res.json({
+    configured: !!openai,
+    model: openai ? SUPPORT_MODEL : null
+  });
+});
 
 app.post("/api/support/chat",
   sameOrigin,

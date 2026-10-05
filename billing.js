@@ -13,31 +13,19 @@
   }
 
   async function checkout(plan, fallbackHref) {
-    if (!isPlan(plan)) return;
+    if (plan !== "creator" && plan !== "pro") return;
+    const href = fallbackHref || `/subscribe/${plan}`;
     const controls = [...document.querySelectorAll(`[data-plan="${plan}"]`)];
     controls.forEach(c => {
-      c.dataset.busy = "1";
-      c.setAttribute("aria-busy", "true");
       c.dataset.original = c.textContent;
       c.textContent = "Opening checkout…";
       if ("disabled" in c) c.disabled = true;
+      c.setAttribute("aria-busy", "true");
     });
 
-    try {
-      const me = await fetch("/api/auth/me", { credentials: "include", cache: "no-store" });
-      if (me.status === 401) {
-        location.assign(`/account?next=${encodeURIComponent(plan)}`);
-        return;
-      }
-      if (!me.ok) throw new Error("We couldn't verify your account. Please sign in again.");
-
-      // Primary path: normal browser navigation to the first-party checkout route.
-      // This also avoids client-side JSON/redirect edge cases and works with ad/privacy extensions.
-      location.assign(fallbackHref || `/subscribe/${plan}`);
-    } catch (err) {
-      // Last-resort navigation still works even when fetch is blocked.
-      location.assign(fallbackHref || `/subscribe/${plan}`);
-    }
+    // Primary path is first-party navigation, not an API fetch.
+    // The server owns authentication, plan lookup, exact pricing and Stripe redirect.
+    window.location.assign(href);
   }
 
   function init() {

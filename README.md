@@ -132,3 +132,16 @@ The support agent uses the OpenAI Responses API with `gpt-6-luna` by default for
 Creator and Pro checkout no longer depend exclusively on the environment Price IDs. If a configured Price ID is stale, belongs to the wrong Stripe mode, or was deleted, the server automatically finds the active monthly Price attached to `ShortSpark Creator` or `ShortSpark Pro` in the SAME Stripe account/mode as `STRIPE_SECRET_KEY`.
 
 For live AI support, set `OPENAI_API_KEY`. The support model defaults to the current `gpt-6-luna` API model for cost-sensitive, high-volume support.
+
+
+## v3.5 exact Stripe plan pricing
+
+Checkout now guarantees the intended plan prices in the same Stripe account/mode as `STRIPE_SECRET_KEY`:
+- Creator: **$8.99 USD/month**
+- Pro: **$15.99 USD/month**
+
+The server no longer accepts a valid-but-wrong recurring price (for example $11.99) just because it exists. It first checks ShortSpark lookup keys, then the exact product + exact amount + monthly interval. If the expected product or exact price does not exist, the server creates it in the CURRENT Stripe mode. This avoids test/live mismatches and stale Price IDs.
+
+## v3.5 AI support
+
+The support endpoint uses the OpenAI Responses API with `gpt-6-luna` by default. Add `OPENAI_API_KEY` to Render. The key stays server-side and is never shipped to the browser.
