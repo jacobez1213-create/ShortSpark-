@@ -14,6 +14,9 @@ async function generateVideo(){
  const idea=safe(document.getElementById('idea').value);
  const style=document.getElementById('style').value;
  const aspectRatio=document.getElementById('aspect').value;
+ const narrationScript=safe(document.getElementById('script')?.value);
+ const subjectAction=safe(document.getElementById('subjectAction')?.value);
+ const voiceEmotion=document.getElementById('voiceEmotion')?.value || 'excited';
  const wrap=document.getElementById('durationWrap');
  const durationSeconds=wrap.style.display==='none'?10:Number(document.getElementById('duration').value);
 
@@ -56,7 +59,7 @@ async function generateVideo(){
        credentials:'include',
        cache:'no-store',
        headers:{'Content-Type':'application/json'},
-       body:JSON.stringify({idea,style,aspectRatio,durationSeconds}),
+       body:JSON.stringify({idea,style,aspectRatio,durationSeconds,narrationScript,subjectAction,voiceEmotion}),
        signal:controller.signal
      });
    }finally{clearTimeout(timeout)}

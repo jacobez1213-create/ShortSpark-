@@ -25,6 +25,8 @@ const replicate = process.env.REPLICATE_API_TOKEN ? new Replicate({ auth: proces
 const priceIds = { creator: process.env.STRIPE_PRICE_CREATOR, pro: process.env.STRIPE_PRICE_PRO };
 const VIDEO_MODEL = "wan-video/wan-2.2-5b-fast";
 const TTS_MODEL = process.env.TTS_MODEL || "inworld/realtime-tts-1.5-mini";
+const TTS_VOICE_ID = process.env.TTS_VOICE_ID || "Alex";
+const VOICE_EMOTIONS = new Set(["excited","suspenseful","warm","dramatic","calm"]);
 const FREE_VIDEOS_PER_DAY = Math.max(1, Number(process.env.FREE_VIDEOS_PER_DAY || 1));
 const CREATOR_VIDEOS_PER_MONTH = Math.max(1, Number(process.env.CREATOR_VIDEOS_PER_MONTH || 10));
 const PRO_VIDEOS_PER_MONTH = Math.max(1, Number(process.env.PRO_VIDEOS_PER_MONTH || 24));
@@ -195,12 +197,18 @@ async function initDb() {
       error TEXT,
       video_data BYTEA,
       captions_text TEXT,
+      narration_script TEXT,
+      subject_action TEXT,
+      voice_emotion TEXT NOT NULL DEFAULT 'excited',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       completed_at TIMESTAMPTZ
     );
     ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS duration_seconds INTEGER NOT NULL DEFAULT 10;
     ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS video_data BYTEA;
     ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS captions_text TEXT;
+    ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS narration_script TEXT;
+    ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS subject_action TEXT;
+    ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS voice_emotion TEXT NOT NULL DEFAULT 'excited';
     CREATE INDEX IF NOT EXISTS video_generations_user_created_idx ON video_generations(user_id, created_at);
   `);
   await db.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS complimentary_pro BOOLEAN NOT NULL DEFAULT FALSE");
@@ -215,7 +223,7 @@ async function usageForUser(user) {
   const count = Number((await db.query(query, [user.id])).rows[0]?.count || 0);
   return { used: count, limit, remaining: Math.max(0, limit - count), period, plan: user.plan };
 }
-async function reserveGeneration(user, idea, style, aspectRatio, requestedDuration) {
+async function reserveGeneration(user, idea, style, aspectRatio, requestedDuration, narrationScript, subjectAction, voiceEmotion) {
   requireDb();
   const client = await db.connect();
   try {
@@ -240,7 +248,7 @@ async function reserveGeneration(user, idea, style, aspectRatio, requestedDurati
       return { ok: false, usage: { used: count, limit, remaining: 0, period, plan: freshPlan } };
     }
     const jobId = crypto.randomUUID();
-    await client.query("INSERT INTO video_generations(job_id,user_id,idea,style,aspect_ratio,duration_seconds,status) VALUES($1,$2,$3,$4,$5,$6,'queued')", [jobId, user.id, idea, style, aspectRatio, selectedDuration]);
+    await client.query("INSERT INTO video_generations(job_id,user_id,idea,style,aspect_ratio,duration_seconds,status,narration_script,subject_action,voice_emotion) VALUES($1,$2,$3,$4,$5,$6,'queued',$7,$8,$9)", [jobId, user.id, idea, style, aspectRatio, selectedDuration, narrationScript, subjectAction, voiceEmotion]);
     await client.query("COMMIT");
     return { ok: true, jobId, totalDuration: selectedDuration, usage: { used: ownerBypass ? count : count + 1, limit, remaining: ownerBypass ? 9999 : Math.max(0, limit - count - 1), period, plan: effectiveForGeneration }, ownerBypass };
   } catch (err) {
@@ -249,6 +257,52 @@ async function reserveGeneration(user, idea, style, aspectRatio, requestedDurati
 }
 
 function cleanIdea(value) { return String(value || "").replace(/[<>]/g, "").trim().slice(0, 900); }
+function cleanScript(value) {
+  return String(value || "")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\[[^\]]*\]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 900);
+}
+function cleanAction(value) {
+  return String(value || "").replace(/[<>]/g, "").replace(/\s+/g, " ").trim().slice(0, 700);
+}
+function cleanEmotion(value) {
+  const emotion = String(value || "").toLowerCase();
+  return VOICE_EMOTIONS.has(emotion) ? emotion : "excited";
+}
+function fitScriptToDuration(text, totalDuration) {
+  const clean = cleanScript(text);
+  if (!clean) return narrationForDuration("", totalDuration);
+  const maxChars = Math.max(55, Math.floor(Number(totalDuration) * 13));
+  if (clean.length <= maxChars) return clean;
+  const words = clean.split(/\s+/);
+  let output = "";
+  for (const word of words) {
+    const candidate = output ? `${output} ${word}` : word;
+    if (candidate.length > maxChars) break;
+    output = candidate;
+  }
+  return output || clean.slice(0, maxChars);
+}
+function emotionMarkup(emotion) {
+  switch (emotion) {
+    case "suspenseful": return "[fearful]";
+    case "warm": return "[happy]";
+    case "dramatic": return "[surprised]";
+    case "calm": return "";
+    default: return "[happy]";
+  }
+}
+function applyVoiceEmotion(script, emotion) {
+  const clean = fitScriptToDuration(script, 30).replace(/[\r\n]+/g, " ").trim();
+  const mark = emotionMarkup(emotion);
+  if (!clean) return mark ? `${mark}Hi there.` : "Hi there.";
+  const sentences = clean.split(/(?<=[.!?])\s+/).filter(Boolean);
+  const joined = sentences.join(" <break time=\"250ms\" /> ");
+  return mark ? `${mark}${joined}` : joined;
+}
 function normalizePaidDuration(value) {
   const n = Number(value);
   return Number.isInteger(n) && n >= 5 && n <= 30 ? n : null;
@@ -287,15 +341,15 @@ function outputUrl(output) {
   if (output && typeof output.url === "string") return output.url;
   throw new Error("The video provider returned an unexpected output.");
 }
-async function generateNarration(text) {
+async function generateNarration(text, emotion = "excited") {
   if (!replicate) throw new Error("Replicate is not configured.");
   const out = await replicate.run(TTS_MODEL, { input: {
-    text,
+    text: applyVoiceEmotion(text, emotion),
     language: "en",
-    voice_id: process.env.TTS_VOICE_ID || "Ashley",
+    voice_id: TTS_VOICE_ID,
     sample_rate: 48000,
     audio_format: "mp3",
-    speaking_rate: 0
+    speaking_rate: emotion === "calm" ? -10 : emotion === "excited" ? 4 : 0
   }});
   return outputUrl(out);
 }
@@ -314,7 +368,7 @@ async function downloadTo(url, file) {
   if (!response.ok) throw new Error(`Could not download generated video (${response.status}).`);
   await fs.writeFile(file, Buffer.from(await response.arrayBuffer()));
 }
-function buildStoryPlan(idea, style, sceneCount) {
+function buildStoryPlan(idea, style, sceneCount, subjectAction) {
   const pace = {
     "Fast & viral": "fast pacing, punchy visual changes, energetic camera motion",
     "Storytelling": "cinematic storytelling, clear visual progression, dramatic pacing",
@@ -324,22 +378,22 @@ function buildStoryPlan(idea, style, sceneCount) {
   }[style] || "cinematic short-form storytelling";
   return {
     pace,
-    continuity: `Continuity bible: keep the SAME main subject, same appearance, same clothing, same props, same location, same time of day, same color language, and same cinematic style across every scene. Do not redesign the character or environment between scenes. Treat the previous clip's final frame as the exact starting state for the next clip.`,
+    continuity: `Continuity bible: keep the SAME main subject, same appearance, same clothing, same props, same location, same time of day, same color language, and same cinematic style across every scene. Do not redesign the character or environment between scenes. Treat the previous clip's final frame as the exact starting state for the next clip. The subject/object action is a hard requirement and must be visibly performed on screen, not merely implied.`,
     beats: sceneCount === 1 ? [
-      `FULL STORY: establish the main subject and situation immediately, build the action, and deliver a complete payoff in one continuous shot tied directly to: ${idea}.`
+      `FULL STORY: establish the main subject and situation immediately, then make the subject perform this specific action: ${subjectAction || "follow the most natural action implied by the idea"}. Build the action and deliver a complete payoff in one continuous shot tied directly to: ${idea}.`
     ] : sceneCount === 2 ? [
-      `HOOK: establish the main subject and situation immediately. Start with a visually clear action tied directly to: ${idea}. End in a specific state that can continue naturally into Scene 2.`,
-      `PAYOFF: begin from the exact state of Scene 1, escalate the action, and resolve the story with the strongest visual payoff related to ${idea}.`
+      `HOOK: establish the main subject and situation immediately. Start with the specific action: ${subjectAction || "a clear action tied to the idea"}. End in a specific state that can continue naturally into Scene 2.`,
+      `PAYOFF: begin from the exact state of Scene 1, continue the same action, escalate it, and resolve the story with the strongest visual payoff related to ${idea}.`
     ] : [
-      `HOOK: establish the main subject and situation immediately. Start with a visually clear action tied directly to: ${idea}. End the scene with the subject in a specific state that can continue naturally into the next shot.`,
-      `ESCALATION: begin from the exact state of Scene 1 and continue the same action. Advance the story with one concrete new development, keeping the same subject, wardrobe, props, location, and time continuity. End in a new state that can continue naturally into Scene 3.`,
-      `PAYOFF: begin from the exact state of Scene 2. Resolve the story with the strongest visual payoff related to ${idea}. Finish with a memorable final image and a natural stopping point.`
+      `HOOK: establish the main subject and situation immediately. Start with the specific action: ${subjectAction || "a clear action tied to the idea"}. End the scene with the subject in a specific state that can continue naturally into the next shot.`,
+      `ESCALATION: begin from the exact state of Scene 1 and continue the same action: ${subjectAction || "the same clearly defined action"}. Advance the story with one concrete new development, keeping the same subject, wardrobe, props, location, and time continuity. End in a new state that can continue naturally into Scene 3.`,
+      `PAYOFF: begin from the exact state of Scene 2. Continue the same action and resolve the story with the strongest visual payoff related to ${idea}. Finish with a memorable final image and a natural stopping point.`
     ]
   };
 }
-function buildScenePrompt(plan, idea, style, aspectRatio, sceneNumber) {
+function buildScenePrompt(plan, idea, style, aspectRatio, sceneNumber, subjectAction) {
   const sceneCount = plan.beats.length;
-  return `Short-form ${aspectRatio} video. ${plan.pace}. High visual quality, realistic motion, coherent subject continuity, no logos or watermarks. NO SPOKEN DIALOGUE and NO MUSIC; visuals only. ${plan.continuity} Scene ${sceneNumber} of ${sceneCount}. ${plan.beats[sceneNumber-1]} The topic is: ${idea}. This is ${style} style. Avoid unrelated objects, unrelated locations, or visual resets. Avoid introducing new main characters unless absolutely required by the story. The final second should hold a stable frame so the next scene can continue from it.`;
+  return `Short-form ${aspectRatio} video. ${plan.pace}. High visual quality, realistic motion, coherent subject continuity, no logos or watermarks. NO SPOKEN DIALOGUE and NO MUSIC; visuals only. ${plan.continuity} Scene ${sceneNumber} of ${sceneCount}. ${plan.beats[sceneNumber-1]} The topic is: ${idea}. The specific subject/object action is: ${subjectAction || "perform the clearest action implied by the topic"}. This is ${style} style. Treat the specified action as the primary visual instruction. Avoid unrelated objects, unrelated locations, or visual resets. Avoid introducing new main characters unless absolutely required by the story. Keep the subject large enough to read on a phone and show the action clearly. The final second should hold a stable frame so the next scene can continue from it.`;
 }
 
 // Stripe webhooks must be parsed as raw bytes before express.json().
@@ -555,7 +609,7 @@ async function extractLastFrame(videoPath, imagePath) {
   await ffmpegRun(["-y", "-sseof", "-0.08", "-i", videoPath, "-frames:v", "1", "-q:v", "2", imagePath]);
 }
 
-async function generateJob(jobId, idea, style, aspectRatio, plan, totalDuration) {
+async function generateJob(jobId, idea, style, aspectRatio, plan, totalDuration, narrationScript, subjectAction, voiceEmotion) {
   const job = jobs.get(jobId); if (!job) return;
   const isFree = plan === "free";
   const safeDuration = isFree ? 10 : Math.max(5, Math.min(30, Number(totalDuration) || 30));
@@ -571,7 +625,7 @@ async function generateJob(jobId, idea, style, aspectRatio, plan, totalDuration)
     console.log(`[video ${jobId}] model=${VIDEO_MODEL} resolution=${providerResolution} duration=${safeDuration}s scenes=${sceneCount}`);
     job.message = isFree ? "Creating your 10-second free preview…" : `Creating your ${safeDuration}-second Short in ${sceneCount} connected scene${sceneCount === 1 ? "" : "s"}…`;
 
-    const storyPlan = buildStoryPlan(idea, style, sceneCount);
+    const storyPlan = buildStoryPlan(idea, style, sceneCount, subjectAction);
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "shortspark-"));
     const clipPaths = [];
     let continuationImage = null;
@@ -583,7 +637,7 @@ async function generateJob(jobId, idea, style, aspectRatio, plan, totalDuration)
       job.progress = 8 + Math.floor(i * (46 / Math.max(1, sceneCount - 1 || 1)));
       job.message = `Generating scene ${sceneNumber} of ${sceneCount} (${clipDuration}s) at ${providerResolution}…`;
       const input = {
-        prompt: buildScenePrompt(storyPlan, idea, style, aspectRatio, sceneNumber),
+        prompt: buildScenePrompt(storyPlan, idea, style, aspectRatio, sceneNumber, subjectAction),
         negative_prompt: "blurry, low detail, deformed hands, extra fingers, extra limbs, duplicate people, warped face, text, subtitles, logos, watermark, flicker, jitter, scene reset, unrelated objects, broken anatomy",
         num_frames: frameCountForSeconds(clipDuration),
         resolution: providerResolution,
@@ -608,7 +662,8 @@ async function generateJob(jobId, idea, style, aspectRatio, plan, totalDuration)
     }
 
     job.progress = 62; job.message = "Generating low-cost voice narration…";
-    const narrationUrl = await generateNarration(narrationForDuration(idea, safeDuration));
+    const narrationText = narrationScript || narrationForDuration(idea, safeDuration);
+    const narrationUrl = await generateNarration(fitScriptToDuration(narrationText, safeDuration), voiceEmotion);
     const audioPath = path.join(dir, "narration.mp3");
     await downloadTo(narrationUrl, audioPath);
     const listPath = path.join(dir, "concat.txt");
@@ -627,7 +682,7 @@ async function generateJob(jobId, idea, style, aspectRatio, plan, totalDuration)
     ]);
 
     const captionsPath = path.join(dir, "captions.srt");
-    const captionText = narrationForDuration(idea, safeDuration);
+    const captionText = fitScriptToDuration(narrationScript || narrationForDuration(idea, safeDuration), safeDuration);
     const words = captionText.split(/\s+/).filter(Boolean);
     const chunkCount = sceneCount;
     const captions = [];
@@ -702,16 +757,19 @@ app.post("/api/generate-video", sameOrigin, requireUser, rateLimit("video", { wi
   const style = STYLE_OPTIONS.has(req.body?.style) ? req.body.style : "Fast & viral";
   const aspectRatio = req.body?.aspectRatio === "16:9" ? "16:9" : "9:16";
   const requestedDuration = req.body?.durationSeconds;
+  const narrationScript = cleanScript(req.body?.narrationScript);
+  const subjectAction = cleanAction(req.body?.subjectAction);
+  const voiceEmotion = cleanEmotion(req.body?.voiceEmotion);
   if (!idea) return res.status(400).json({ error: "Enter an idea first." });
   if (!replicate) return res.status(503).json({ error: "AI video is not configured yet. Add REPLICATE_API_TOKEN to Render." });
   if (!db) return res.status(503).json({ error: "Accounts are not configured yet. Add DATABASE_URL to Render." });
   if (jobs.size > 10) return res.status(429).json({ error: "The generator is busy. Try again in a minute." });
   try {
-    const reservation = await reserveGeneration(req.user, idea, style, aspectRatio, requestedDuration);
+    const reservation = await reserveGeneration(req.user, idea, style, aspectRatio, requestedDuration, narrationScript, subjectAction, voiceEmotion);
     if (reservation.invalidDuration) return res.status(400).json({ error: "Paid video duration must be between 5 and 30 seconds." });
     if (!reservation.ok) return res.status(429).json({ error: `You've used all ${reservation.usage.limit} video generation(s) for this ${reservation.usage.period}.`, usage: reservation.usage });
     jobs.set(reservation.jobId, { status: "queued", progress: 2, message: "Queued…", createdAt: Date.now(), userId: req.user.id, plan: reservation.usage.plan, totalDuration: reservation.totalDuration, ownerBypass: !!reservation.ownerBypass });
-    generateJob(reservation.jobId, idea, style, aspectRatio, reservation.usage.plan, reservation.totalDuration);
+    generateJob(reservation.jobId, idea, style, aspectRatio, reservation.usage.plan, reservation.totalDuration, narrationScript, subjectAction, voiceEmotion);
     res.status(202).json({ jobId: reservation.jobId, usage: reservation.usage, durationSeconds: reservation.totalDuration });
   } catch (err) { console.error(err); res.status(500).json({ error: "Could not start video generation." }); }
 });

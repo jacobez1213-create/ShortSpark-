@@ -91,3 +91,13 @@ The generator now explicitly marks in-memory jobs as `completed` when the final 
 ## v2.9 paid prompt helper
 
 Paid users now get an in-app prompt example and copy/use controls. The helper clearly lists paid benefits: 5–30 second duration selection, 480p delivery, fast Wan 2.2 5B generation, connected scenes, MP4 and captions downloads, and paid plan monthly allowances. The helper is hidden from free accounts.
+
+
+## v3.0 script + action + expressive voice controls
+
+The generator now accepts three explicit creative controls:
+- **Script / narration:** exact words to speak; blank means ShortSpark creates the narration.
+- **What is the subject/object doing?:** direct visual-action instruction used in every connected scene prompt.
+- **Voice emotion:** excited, suspenseful, warm, dramatic, or calm.
+
+The Inworld Realtime TTS 1.5 Mini model supports expressive audio markups such as `[happy]`, `[surprised]`, and `[fearful]`, plus pauses. ShortSpark maps the selected emotion into those markups and uses the `Alex` voice by default because the current model documentation describes it as energetic and expressive. 
