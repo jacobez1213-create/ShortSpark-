@@ -651,14 +651,46 @@ app.get("/api/video-status/:id", requireUser, (req, res) => {
   if (job.status === "failed") return res.status(500).json({ status: "failed", error: job.error || "Video generation failed." });
   res.json({ status: job.status, progress: job.progress, message: job.message });
 });
-app.get("/api/generated-video/:id", requireUser, (req, res) => {
+async function streamVideo(req, res) {
   const job = jobs.get(req.params.id);
   if (!job?.finalPath || job.userId !== req.user.id) return res.status(404).send("Video not found.");
-  res.type("mp4");
-  res.setHeader("Content-Disposition", "inline; filename=shortspark-short.mp4");
-  res.setHeader("Cache-Control", "private, no-store, max-age=0");
-  res.sendFile(job.finalPath);
-});
+  try {
+    const stat = await fs.stat(job.finalPath);
+    const total = stat.size;
+    res.setHeader("Content-Type", "video/mp4");
+    res.setHeader("Content-Disposition", "inline; filename=shortspark-short.mp4");
+    res.setHeader("Accept-Ranges", "bytes");
+    res.setHeader("Cache-Control", "private, no-store, max-age=0");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    if (req.method === "HEAD") return res.status(200).end();
+    const range = req.headers.range;
+    if (!range) {
+      res.setHeader("Content-Length", total);
+      return fs.createReadStream(job.finalPath).pipe(res);
+    }
+    const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+    if (!match) {
+      res.setHeader("Content-Range", `bytes */${total}`);
+      return res.status(416).end();
+    }
+    let start = match[1] ? Number(match[1]) : Math.max(0, total - Number(match[2] || 1));
+    let end = match[2] ? Number(match[2]) : total - 1;
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || start >= total) {
+      res.setHeader("Content-Range", `bytes */${total}`);
+      return res.status(416).end();
+    }
+    end = Math.min(end, total - 1);
+    res.status(206);
+    res.setHeader("Content-Range", `bytes ${start}-${end}/${total}`);
+    res.setHeader("Content-Length", end - start + 1);
+    fs.createReadStream(job.finalPath, { start, end }).pipe(res);
+  } catch (err) {
+    console.error("Video stream error", err);
+    res.status(404).send("Video is no longer available.");
+  }
+}
+app.head("/api/generated-video/:id", requireUser, streamVideo);
+app.get("/api/generated-video/:id", requireUser, streamVideo);
 app.get("/api/generated-captions/:id", requireUser, (req, res) => { const job = jobs.get(req.params.id); if (!job?.captionsPath || job.userId !== req.user.id) return res.status(404).send("Captions not found."); res.type("text/plain").sendFile(job.captionsPath); });
 
 setInterval(async () => {

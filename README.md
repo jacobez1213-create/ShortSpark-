@@ -58,3 +58,8 @@ Its current API supports 480p, 16:9 and 9:16, `go_fast`, image-to-video continua
 
 ## v2.1 player fix
 The player now fetches the protected MP4 as a blob, loads it into a browser object URL, waits for metadata before revealing the player, sets an explicit MP4 response type on the server, and provides an Open video fallback. The Wan 2.2 5B Fast input is also aligned with its current API schema.
+
+
+## v2.2 video player fix
+
+Completed videos are now streamed directly to the browser with HTTP Range support instead of being downloaded into a client-side Blob before playback. This lets the native video player start as soon as it has enough data and is much more reliable on Render's free instance.

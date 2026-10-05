@@ -92,29 +92,22 @@ async function generateVideo(){
 async function poll(id){try{const r=await fetch('/api/video-status/'+encodeURIComponent(id));const d=await r.json();if(d.status==='failed'||!r.ok)throw new Error(d.error||'Video generation failed.');progress(d.progress||0,d.message||'Generating…');status(d.status==='completed'?'Complete…':'Generating…',d.status==='completed'?'DONE':'WORKING');if(d.status==='completed'){
  progress(97,'Loading your finished video into the player…');
  const vid=document.getElementById('video');
- const vr=await fetch(d.videoUrl+'?t='+Date.now(),{credentials:'same-origin',cache:'no-store'});
- if(!vr.ok) throw new Error(`The finished video could not be loaded (${vr.status}).`);
- const type=vr.headers.get('content-type')||'';
- if(!type.includes('video/mp4')) throw new Error('The server returned an unexpected file instead of an MP4 video.');
- const blob=await vr.blob();
- if(window.__shortSparkVideoUrl) URL.revokeObjectURL(window.__shortSparkVideoUrl);
- window.__shortSparkVideoUrl=URL.createObjectURL(blob);
- vid.src=window.__shortSparkVideoUrl;
+ const videoUrl=d.videoUrl+'?t='+Date.now();
+ vid.src=videoUrl;
  vid.load();
- document.getElementById('download').href=window.__shortSparkVideoUrl;
- document.getElementById('openVideo').href=window.__shortSparkVideoUrl;
+ document.getElementById('download').href=videoUrl;
+ document.getElementById('openVideo').href=videoUrl;
  document.getElementById('captions').href=d.captionsUrl+'?t='+Date.now();
- await new Promise((resolve,reject)=>{
-   const done=()=>{cleanup();resolve()};
-   const fail=()=>{cleanup();reject(new Error('The generated MP4 was returned, but the browser could not decode it.'))};
-   const cleanup=()=>{vid.removeEventListener('loadedmetadata',done);vid.removeEventListener('error',fail)};
-   vid.addEventListener('loadedmetadata',done,{once:true});
-   vid.addEventListener('error',fail,{once:true});
-   setTimeout(()=>{if(vid.readyState>=1) done()},5000);
- });
  document.getElementById('videoEmpty').style.display='none';
  document.getElementById('videoOverlay').style.display='block';
  document.getElementById('videoWrap').style.display='flex';
+ status('Ready to watch','DONE');
+ progress(100,'Your Short is ready.');
+ // Let the browser stream the MP4 directly. Do not wait for a full-file fetch.
+ const ready=()=>{document.getElementById('state').textContent='Ready to watch'};
+ const fail=()=>showError('The MP4 was created, but your browser could not play it. Use Open video to test the file directly.');
+ vid.addEventListener('loadedmetadata',ready,{once:true});
+ vid.addEventListener('error',fail,{once:true});
  progress(100,d.message||'Your Short is ready.');status('Ready to watch','DONE');document.getElementById('generate').disabled=false;
  return
 }timer=setTimeout(()=>poll(id),1000)}catch(e){showError(e.message);document.getElementById('generate').disabled=false}}
