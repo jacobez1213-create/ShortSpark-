@@ -1,22 +1,37 @@
 (() => {
   const state = { messages: [], open: false, busy: false };
 
+  function el(id) { return document.getElementById(id); }
+
   function appendMessage(role, content) {
-    const wrap = document.getElementById("supportMessages");
+    const wrap = el("supportMessages");
     if (!wrap) return;
-    const el = document.createElement("div");
-    el.className = `support-msg ${role}`;
+    const row = document.createElement("div");
+    row.className = `support-msg ${role}`;
     const label = role === "user" ? "You" : "ShortSpark AI";
-    el.innerHTML = `<div class="support-label">${label}</div><div class="support-bubble"></div>`;
-    el.querySelector(".support-bubble").textContent = content;
-    wrap.appendChild(el);
+    const lab = document.createElement("div");
+    lab.className = "support-label";
+    lab.textContent = label;
+    const bubble = document.createElement("div");
+    bubble.className = "support-bubble";
+    bubble.textContent = content;
+    row.append(lab, bubble);
+    wrap.appendChild(row);
     wrap.scrollTop = wrap.scrollHeight;
   }
 
-  async function send() {
-    const input = document.getElementById("supportInput");
-    const sendBtn = document.getElementById("supportSend");
+  function setOpen(value) {
+    state.open = value;
+    const root = el("supportWidget");
+    if (root) root.classList.toggle("open", value);
+    if (value) el("supportInput")?.focus();
+  }
+
+  async function sendMessage() {
+    const input = el("supportInput");
+    const sendBtn = el("supportSend");
     if (!input || !sendBtn || state.busy) return;
+
     const text = input.value.trim();
     if (!text) return;
 
@@ -29,21 +44,32 @@
     const typing = document.createElement("div");
     typing.className = "support-msg assistant";
     typing.id = "supportTyping";
-    typing.innerHTML = '<div class="support-label">ShortSpark AI</div><div class="support-bubble">Thinking…</div>';
-    document.getElementById("supportMessages").appendChild(typing);
+    const lab = document.createElement("div");
+    lab.className = "support-label";
+    lab.textContent = "ShortSpark AI";
+    const bubble = document.createElement("div");
+    bubble.className = "support-bubble";
+    bubble.textContent = "Thinking…";
+    typing.append(lab, bubble);
+    el("supportMessages")?.appendChild(typing);
 
     try {
-      const r = await fetch("/api/support/chat", {
+      const response = await fetch("/api/support/chat", {
         method: "POST",
         credentials: "include",
         cache: "no-store",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages: state.messages })
       });
-      const d = await r.json().catch(() => ({}));
+
+      const data = await response.json().catch(() => ({}));
       document.getElementById("supportTyping")?.remove();
-      if (!r.ok) throw new Error(d.error || "Support is temporarily unavailable.");
-      const answer = String(d.answer || "I don't have an answer for that yet.");
+
+      if (!response.ok) {
+        throw new Error(data.error || "Support is temporarily unavailable.");
+      }
+
+      const answer = String(data.answer || "I don't have an answer for that yet.");
       state.messages.push({ role: "assistant", content: answer });
       appendMessage("assistant", answer);
     } catch (err) {
@@ -57,30 +83,36 @@
   }
 
   function init() {
-    const root = document.getElementById("supportWidget");
+    const root = el("supportWidget");
     if (!root) return;
 
-    const toggle = document.getElementById("supportToggle");
-    const close = document.getElementById("supportClose");
-    const send = document.getElementById("supportSend");
-    const input = document.getElementById("supportInput");
+    const toggle = el("supportToggle");
+    const close = el("supportClose");
+    const send = el("supportSend");
+    const input = el("supportInput");
 
-    toggle?.addEventListener("click", () => {
-      state.open = !state.open;
-      root.classList.toggle("open", state.open);
-      if (state.open) input?.focus();
+    toggle?.addEventListener("click", event => {
+      // If the control is an <a>, prevent navigation only when the widget exists.
+      event.preventDefault();
+      setOpen(!state.open);
     });
-    close?.addEventListener("click", () => {
-      state.open = false;
-      root.classList.remove("open");
-    });
-    send?.addEventListener("click", send);
-    input?.addEventListener("keydown", e => {
-      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+    close?.addEventListener("click", () => setOpen(false));
+    send?.addEventListener("click", sendMessage);
+    input?.addEventListener("keydown", event => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        sendMessage();
+      }
     });
 
-    appendMessage("assistant", "Hi! I'm ShortSpark AI Support. Ask me about plans, billing, prompts, video generation, or troubleshooting.");
+    if (!el("supportMessages")?.children.length) {
+      appendMessage("assistant", "Hi! I'm ShortSpark AI Support. Ask about plans, billing, prompts, video generation, or troubleshooting.");
+    }
   }
 
-  document.addEventListener("DOMContentLoaded", init);
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init, { once: true });
+  } else {
+    init();
+  }
 })();

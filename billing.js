@@ -1,58 +1,72 @@
 (() => {
-  const routeToCheckout = async (plan) => {
-    const safePlan = plan === "creator" || plan === "pro" ? plan : null;
-    if (!safePlan) return;
+  function setError(message) {
+    const box = document.getElementById("billingError");
+    if (box) {
+      box.hidden = false;
+      box.textContent = message;
+    } else {
+      alert(message);
+    }
+  }
 
-    const buttons = [...document.querySelectorAll(`[data-plan="${safePlan}"]`)];
-    buttons.forEach(btn => { btn.disabled = true; btn.dataset.original = btn.textContent; btn.textContent = "Opening checkout…"; });
+  async function enhanceCheckout(link) {
+    const href = link.getAttribute("href");
+    if (!href || link.dataset.busy === "1") return;
+
+    // The plain /subscribe/:plan link remains the fallback. JS only adds
+    // a friendlier loading state and an early auth check.
+    const plan = link.dataset.plan;
+    if (plan !== "creator" && plan !== "pro") return;
+
+    link.dataset.busy = "1";
+    link.setAttribute("aria-busy", "true");
+    const original = link.textContent;
+    link.textContent = "Opening checkout…";
 
     try {
-      const me = await fetch("/api/auth/me", { credentials: "include", cache: "no-store" });
+      const me = await fetch("/api/auth/me", {
+        credentials: "include",
+        cache: "no-store"
+      });
+
       if (me.status === 401) {
-        location.href = `/account?next=${encodeURIComponent(safePlan)}`;
+        window.location.assign(`/account?next=${encodeURIComponent(plan)}`);
         return;
       }
 
-      const meData = await me.json().catch(() => ({}));
-      if (!me.ok) throw new Error(meData.error || "Your account could not be verified.");
-
-      const r = await fetch("/api/create-checkout-session", {
-        method: "POST",
-        credentials: "include",
-        cache: "no-store",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ plan: safePlan })
-      });
-
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok || !d.url) throw new Error(d.error || "Stripe Checkout could not be started.");
-
-      location.assign(d.url);
-    } catch (err) {
-      buttons.forEach(btn => {
-        btn.disabled = false;
-        btn.textContent = btn.dataset.original || "Choose plan";
-      });
-      const msg = document.getElementById("billingError");
-      if (msg) {
-        msg.hidden = false;
-        msg.textContent = err.message || "Checkout could not be opened.";
-      } else {
-        alert(err.message || "Checkout could not be opened.");
+      if (!me.ok) {
+        // Let the normal GET route be the final authority.
+        window.location.assign(href);
+        return;
       }
+
+      // Use the same first-party GET route. This avoids fragile client-side
+      // JSON orchestration and works with browser navigation semantics.
+      window.location.assign(href);
+    } catch (err) {
+      // Absolute fallback: plain browser navigation to /subscribe/:plan.
+      window.location.assign(href);
+    } finally {
+      link.dataset.busy = "0";
+      link.removeAttribute("aria-busy");
+      link.textContent = original;
     }
-  };
+  }
 
-  window.ShortSparkCheckout = routeToCheckout;
+  function init() {
+    document.querySelectorAll('a[data-plan][href^="/subscribe/"]').forEach(link => {
+      link.addEventListener("click", event => {
+        // Keep middle-click / Ctrl-click / Shift-click native.
+        if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        event.preventDefault();
+        enhanceCheckout(link);
+      });
+    });
+  }
 
-  document.addEventListener("click", (event) => {
-    const btn = event.target.closest("[data-plan]");
-    if (!btn) return;
-    event.preventDefault();
-    routeToCheckout(btn.dataset.plan);
-  });
-
-  document.addEventListener("DOMContentLoaded", () => {
-    document.querySelectorAll("[data-plan]").forEach(btn => btn.removeAttribute("onclick"));
-  });
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init, { once: true });
+  } else {
+    init();
+  }
 })();

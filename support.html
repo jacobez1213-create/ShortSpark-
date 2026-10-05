@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ShortSpark — AI Customer Support</title>
+<style>
+:root{--bg:#070812;--card:#101322;--text:#f7f8ff;--muted:#aab0c1;--line:#252a3e;--a:#7c5cff;--b:#20d9a2}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 75% -10%,#32285f 0,transparent 35%),var(--bg);color:var(--text);font-family:Inter,system-ui,sans-serif}.wrap{max-width:820px;margin:auto;padding:30px 18px 70px}.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px}.logo{font-size:22px;font-weight:900;text-decoration:none;color:#fff}.logo span{color:var(--b)}.back{color:#c5cadd;text-decoration:none;font-size:13px}.panel{background:#101423;border:1px solid var(--line);border-radius:18px;overflow:hidden}.head{padding:18px;border-bottom:1px solid var(--line)}.head h1{margin:0 0 5px}.head p{margin:0;color:var(--muted);font-size:13px}.messages{min-height:440px;max-height:60vh;overflow:auto;padding:18px;display:flex;flex-direction:column;gap:11px}.support-msg{max-width:82%}.support-msg.user{align-self:flex-end}.support-msg.assistant{align-self:flex-start}.support-label{font-size:10px;text-transform:uppercase;letter-spacing:.6px;font-weight:900;color:#747e96;margin:0 0 4px 3px}.support-bubble{padding:11px 13px;border-radius:13px;background:#161a2a;border:1px solid #2a3044;line-height:1.55;font-size:13px;white-space:pre-wrap}.support-msg.user .support-bubble{background:#322666;border-color:#5643a0}.compose{display:flex;gap:9px;padding:12px;border-top:1px solid var(--line)}textarea{flex:1;min-height:50px;resize:none;background:#090c15;border:1px solid #2b3045;color:#fff;border-radius:11px;padding:11px;font:inherit}.send{border:0;border-radius:11px;padding:0 18px;background:linear-gradient(135deg,var(--a),#a65cff);color:#fff;font-weight:900}.tiny{padding:12px 18px;border-top:1px solid var(--line);font-size:11px;color:#757f97;line-height:1.5}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top"><a class="logo" href="/">Short<span>Spark</span></a><a class="back" href="/">← Back to ShortSpark</a></div>
+  <div class="panel">
+    <div class="head"><h1>ShortSpark AI Support</h1><p>Ask about your plan, billing, prompts, video generation, or troubleshooting.</p></div>
+    <div id="supportMessages" class="messages"></div>
+    <div class="compose"><textarea id="supportInput" maxlength="1200" placeholder="How can we help?"></textarea><button id="supportSend" class="send" type="button">Send</button></div>
+    <div class="tiny">Never share passwords, API keys, Stripe secrets, or database credentials with support.</div>
+  </div>
+</div>
+<script>
+(() => {
+  const state = { messages: [] };
+  const box = document.getElementById("supportMessages");
+  const input = document.getElementById("supportInput");
+  const send = document.getElementById("supportSend");
+  function add(role, text) {
+    const row = document.createElement("div");
+    row.className = "support-msg " + role;
+    const label = document.createElement("div"); label.className = "support-label"; label.textContent = role === "user" ? "You" : "ShortSpark AI";
+    const bubble = document.createElement("div"); bubble.className = "support-bubble"; bubble.textContent = text;
+    row.append(label,bubble); box.appendChild(row); box.scrollTop = box.scrollHeight;
+  }
+  add("assistant","Hi! I'm ShortSpark AI Support. What can I help you with?");
+  async function go() {
+    const text = input.value.trim(); if (!text || send.disabled) return;
+    send.disabled = true; input.value = ""; state.messages.push({role:"user",content:text}); add("user",text); add("assistant","Thinking…");
+    const typing = box.lastElementChild;
+    try {
+      const r = await fetch("/api/support/chat",{method:"POST",credentials:"include",cache:"no-store",headers:{"Content-Type":"application/json"},body:JSON.stringify({messages:state.messages})});
+      const d = await r.json().catch(()=>({})); typing.remove();
+      if(!r.ok) throw new Error(d.error || "Support is temporarily unavailable.");
+      const answer=String(d.answer||"I don't have an answer for that yet."); state.messages.push({role:"assistant",content:answer}); add("assistant",answer);
+    } catch(e) { typing.querySelector(".support-bubble").textContent=e.message || "Support is temporarily unavailable."; }
+    finally { send.disabled=false; input.focus(); }
+  }
+  send.addEventListener("click",go); input.addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();go();}});
+})();
+</script>
+</body>
+</html>

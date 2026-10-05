@@ -109,3 +109,10 @@ The Inworld Realtime TTS 1.5 Mini model supports expressive audio markups such a
 - A floating **AI Support** chat is included on the home and account pages.
 - AI support uses the OpenAI Responses API on the server; the OpenAI key stays in Render environment variables. If no key is configured, ShortSpark falls back to a built-in support FAQ message.
 - Add `OPENAI_API_KEY` and optionally `SUPPORT_MODEL=gpt-5.5` to Render to enable AI support.
+
+
+## v3.2 button reliability
+
+Stripe plan controls are now real first-party links to `/subscribe/creator` and `/subscribe/pro`. JavaScript only enhances the experience, so the checkout buttons still work if frontend JS fails or a privacy extension blocks a script.
+
+AI Support also has a first-party `/support` page. The floating support control opens the widget when JavaScript is available and naturally falls back to the support page if it is not.

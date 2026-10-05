@@ -559,6 +559,43 @@ app.get("/api/health", async (req, res) => {
   }
 });
 
+
+app.get("/subscribe/:plan", rateLimit("subscribe-redirect", {
+  windowMs: 10 * 60 * 1000,
+  max: 8,
+  keyFn: req => req.ip
+}), async (req, res) => {
+  const plan = req.params.plan === "creator" || req.params.plan === "pro" ? req.params.plan : null;
+  if (!plan) return res.status(404).send("Plan not found.");
+
+  const user = await currentUser(req);
+  if (!user) return res.redirect(`/account?next=${encodeURIComponent(plan)}`);
+
+  const price = priceIds[plan];
+  if (!stripe || !price) {
+    return res.status(503).send("Stripe checkout is not configured for this plan yet.");
+  }
+
+  try {
+    const base = `${req.protocol}://${req.get("host")}`;
+    const session = await stripe.checkout.sessions.create({
+      mode: "subscription",
+      client_reference_id: user.id,
+      customer_email: user.email,
+      metadata: { userId: user.id, plan },
+      line_items: [{ price, quantity: 1 }],
+      success_url: `${base}/account?checkout=success`,
+      cancel_url: `${base}/account?checkout=cancelled`,
+      allow_promotion_codes: true
+    }, { idempotencyKey: `get_checkout_${user.id}_${plan}_${Date.now()}` });
+
+    return res.redirect(303, session.url);
+  } catch (err) {
+    console.error("GET checkout redirect error:", err);
+    return res.status(502).send("Stripe Checkout could not be opened. Please try again.");
+  }
+});
+
 app.post("/api/create-checkout-session", sameOrigin, requireUser, rateLimit("checkout", { windowMs: 10 * 60 * 1000, max: 8, keyFn: req => req.user.id }), async (req, res) => {
   const plan = req.body?.plan;
   const price = priceIds[plan];
@@ -957,6 +994,7 @@ setInterval(async () => {
   if (db) { try { await db.query("DELETE FROM sessions WHERE expires_at<NOW()") } catch {} }
 }, 10 * 60 * 1000).unref();
 
+app.get("/support", (req, res) => res.sendFile(path.join(__dirname, "support.html")));
 app.get("/admin", (req, res) => res.sendFile(path.join(__dirname, "admin.html")));
 app.get("/account", (req, res) => res.sendFile(path.join(__dirname, "account.html")));
 app.get("/{*splat}", (req, res) => res.sendFile(path.join(__dirname, "index.html")));
