@@ -42,8 +42,15 @@ If a user asks for a cancellation/refund, explain that they should use their Str
 
 const replicate = process.env.REPLICATE_API_TOKEN ? new Replicate({ auth: process.env.REPLICATE_API_TOKEN }) : null;
 const priceIds = { creator: process.env.STRIPE_PRICE_CREATOR, pro: process.env.STRIPE_PRICE_PRO };
+const DEFAULT_FIRST_USER_SUPPORT_CODE = "SHORTSPARK50";
+const FIRST_USER_SUPPORT_CODE = String(process.env.FIRST_USER_SUPPORT_CODE || DEFAULT_FIRST_USER_SUPPORT_CODE)
+  .trim()
+  .toUpperCase()
+  .replace(/[^A-Z0-9-]/g, "")
+  .slice(0, 40);
 
 const stripePriceCache = new Map();
+
 
 const PLAN_CONFIG = {
   creator: {
@@ -57,6 +64,37 @@ const PLAN_CONFIG = {
     lookupKey: "shortspark_pro_monthly_v1"
   }
 };
+
+async function ensureFirstUserSupportCode(codeInput = FIRST_USER_SUPPORT_CODE) {
+  if (!stripe) throw new Error("Stripe is not connected.");
+  const code = String(codeInput || "").trim().toUpperCase().replace(/[^A-Z0-9-]/g, "").slice(0, 40);
+  if (!code || code.length < 4) throw new Error("Support code must be at least 4 letters/numbers.");
+
+  const existing = await stripe.promotionCodes.list({ code, active: true, limit: 10 });
+  const matching = existing.data.find(p => String(p.code || "").toUpperCase() === code);
+  if (matching) return matching;
+
+  const coupon = await stripe.coupons.create({
+    name: `ShortSpark first-user 50% support — ${code}`,
+    percent_off: 50,
+    duration: "once",
+    metadata: {
+      shortspark_support: "first_user_50",
+      shortspark_code: code
+    }
+  });
+
+  return stripe.promotionCodes.create({
+    promotion: { type: "coupon", coupon: coupon.id },
+    code,
+    max_redemptions: 1,
+    restrictions: { first_time_transaction: true },
+    metadata: {
+      shortspark_support: "first_user_50",
+      shortspark_code: code
+    }
+  });
+}
 
 async function resolveStripePriceId(plan) {
   if (!stripe) return null;
@@ -856,6 +894,51 @@ app.post("/api/admin/revoke-pro", sameOrigin, requireAdmin, rateLimit("revoke-pr
   } catch (err) { console.error(err); res.status(500).json({ error: "Could not revoke Pro." }); }
 });
 
+app.get("/api/admin/first-user-code", requireAdmin, async (req, res) => {
+  if (!stripe) return res.status(503).json({ error: "Stripe is not connected." });
+  try {
+    const code = String(req.query.code || FIRST_USER_SUPPORT_CODE).trim().toUpperCase()
+      .replace(/[^A-Z0-9-]/g, "").slice(0, 40);
+    const matches = await stripe.promotionCodes.list({ code, active: true, limit: 10 });
+    const promo = matches.data.find(p => String(p.code || "").toUpperCase() === code);
+    res.json({
+      configured: !!promo,
+      code,
+      active: !!promo?.active,
+      redemptions: promo?.times_redeemed || 0,
+      maxRedemptions: promo?.max_redemptions || 1,
+      percentOff: 50,
+      firstTimeOnly: true,
+      duration: "first invoice only"
+    });
+  } catch (err) {
+    console.error("First-user support code lookup error:", err);
+    res.status(500).json({ error: "Could not read the first-user support code." });
+  }
+});
+
+app.post("/api/admin/first-user-code", sameOrigin, requireAdmin, rateLimit("first-user-code", { windowMs: 10 * 60 * 1000, max: 10 }), async (req, res) => {
+  if (!stripe) return res.status(503).json({ error: "Stripe is not connected." });
+  try {
+    const code = String(req.body?.code || FIRST_USER_SUPPORT_CODE).trim().toUpperCase()
+      .replace(/[^A-Z0-9-]/g, "").slice(0, 40);
+    const promo = await ensureFirstUserSupportCode(code);
+    res.json({
+      ok: true,
+      code: promo.code,
+      active: !!promo.active,
+      redemptions: promo.times_redeemed || 0,
+      maxRedemptions: promo.max_redemptions || 1,
+      percentOff: 50,
+      firstTimeOnly: true,
+      duration: "first invoice only"
+    });
+  } catch (err) {
+    console.error("First-user support code creation error:", err);
+    res.status(500).json({ error: String(err?.message || "Could not create the support code.").slice(0, 300) });
+  }
+});
+
 app.get("/api/admin/overview", requireAdmin, async (req, res) => {
   if (!stripe) return res.json({ demo: true, available: 0, pending: 0, revenue: 0, paymentCount: 0, activeSubscriptions: 0, payments: [], payouts: [] });
   try {
@@ -1152,6 +1235,7 @@ setInterval(async () => {
 
 app.get("/support", (req, res) => res.sendFile(path.join(__dirname, "support.html")));
 app.get("/admin", (req, res) => res.sendFile(path.join(__dirname, "admin.html")));
+app.get("/recommendations", (req, res) => res.sendFile(path.join(__dirname, "recommendations.html")));
 app.get("/account", (req, res) => res.sendFile(path.join(__dirname, "account.html")));
 app.get("/{*splat}", (req, res) => res.sendFile(path.join(__dirname, "index.html")));
 
