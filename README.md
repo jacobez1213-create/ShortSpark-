@@ -54,3 +54,7 @@ This model has no native audio output, so ShortSpark generates narration separat
 
 This build actively defaults to `wan-video/wan-2.2-5b-fast`.
 Its current API supports 480p, 16:9 and 9:16, `go_fast`, image-to-video continuation, and 81–121 frames at 16 fps. The app chains the minimum number of connected shots needed for 5–30 second paid videos, then trims the assembled MP4 to the exact requested duration. See the current Replicate model page and schema for the authoritative inputs and pricing.
+
+
+## v2.1 player fix
+The player now fetches the protected MP4 as a blob, loads it into a browser object URL, waits for metadata before revealing the player, sets an explicit MP4 response type on the server, and provides an Open video fallback. The Wan 2.2 5B Fast input is also aligned with its current API schema.

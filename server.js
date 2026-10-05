@@ -23,7 +23,7 @@ const COOKIE_SECRET = process.env.COOKIE_SECRET || ADMIN_PASSWORD;
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
 const replicate = process.env.REPLICATE_API_TOKEN ? new Replicate({ auth: process.env.REPLICATE_API_TOKEN }) : null;
 const priceIds = { creator: process.env.STRIPE_PRICE_CREATOR, pro: process.env.STRIPE_PRICE_PRO };
-const VIDEO_MODEL = process.env.VIDEO_MODEL || "bytedance/seedance-1.5-pro";
+const VIDEO_MODEL = process.env.VIDEO_MODEL || "wan-video/wan-2.2-5b-fast";
 const TTS_MODEL = process.env.TTS_MODEL || "inworld/realtime-tts-1.5-mini";
 const FREE_VIDEOS_PER_DAY = Math.max(1, Number(process.env.FREE_VIDEOS_PER_DAY || 1));
 const CREATOR_VIDEOS_PER_MONTH = Math.max(1, Number(process.env.CREATOR_VIDEOS_PER_MONTH || 10));
@@ -247,15 +247,24 @@ function normalizePaidDuration(value) {
   return Number.isInteger(n) && n >= 5 && n <= 30 ? n : null;
 }
 function clipDurationsForTotal(totalDuration) {
-  // Seedance 1.5 Pro accepts 2–12 second clips. We preserve continuity by
-  // using the minimum number of connected clips needed for the selected total.
-  if (totalDuration <= 12) return [totalDuration];
-  if (totalDuration <= 24) {
-    const first = Math.ceil(totalDuration / 2);
-    return [first, totalDuration - first];
+  const minSec = 81 / 16;
+  const maxSec = 121 / 16;
+  const count = Math.max(1, Math.ceil(Number(totalDuration) / maxSec));
+  const parts = [];
+  let remaining = Number(totalDuration);
+  for (let i = 0; i < count; i++) {
+    const left = count - i - 1;
+    let value;
+    if (i === count - 1) value = remaining;
+    else value = Math.min(maxSec, Math.max(minSec, remaining / (left + 1)));
+    value = Math.min(maxSec, Math.max(minSec, value));
+    parts.push(Number(value.toFixed(3)));
+    remaining = Number((remaining - value).toFixed(3));
   }
-  const base = Math.floor(totalDuration / 3), rem = totalDuration % 3;
-  return [base + (rem > 0 ? 1 : 0), base + (rem > 1 ? 1 : 0), base];
+  return parts;
+}
+function frameCountForSeconds(seconds) {
+  return Math.max(81, Math.min(121, Math.round(Number(seconds) * 16)));
 }
 function narrationForDuration(idea, totalDuration) {
   if (totalDuration <= 7) return `You won't believe this about ${idea}.`;
@@ -547,12 +556,15 @@ async function generateJob(jobId, idea, style, aspectRatio, plan, totalDuration)
       job.message = `Generating scene ${sceneNumber} of ${sceneCount} (${clipDuration}s) at ${providerResolution}…`;
       const input = {
         prompt: buildScenePrompt(storyPlan, idea, style, aspectRatio, sceneNumber),
-        duration: clipDuration,
+        negative_prompt: "blurry, low detail, deformed hands, extra fingers, extra limbs, duplicate people, warped face, text, subtitles, logos, watermark, flicker, jitter, scene reset, unrelated objects, broken anatomy",
+        num_frames: frameCountForSeconds(clipDuration),
         resolution: providerResolution,
         aspect_ratio: aspectRatio,
-        fps: 24,
-        camera_fixed: false,
-        generate_audio: false
+        frames_per_second: 16,
+        go_fast: true,
+        sample_shift: Number(process.env.WAN_SAMPLE_SHIFT || 12),
+        optimize_prompt: false,
+        disable_safety_checker: false
       };
       if (continuationImage) input.image = continuationImage;
       const output = await replicate.run(VIDEO_MODEL, { input });
@@ -639,7 +651,14 @@ app.get("/api/video-status/:id", requireUser, (req, res) => {
   if (job.status === "failed") return res.status(500).json({ status: "failed", error: job.error || "Video generation failed." });
   res.json({ status: job.status, progress: job.progress, message: job.message });
 });
-app.get("/api/generated-video/:id", requireUser, (req, res) => { const job = jobs.get(req.params.id); if (!job?.finalPath || job.userId !== req.user.id) return res.status(404).send("Video not found."); res.sendFile(job.finalPath); });
+app.get("/api/generated-video/:id", requireUser, (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job?.finalPath || job.userId !== req.user.id) return res.status(404).send("Video not found.");
+  res.type("mp4");
+  res.setHeader("Content-Disposition", "inline; filename=shortspark-short.mp4");
+  res.setHeader("Cache-Control", "private, no-store, max-age=0");
+  res.sendFile(job.finalPath);
+});
 app.get("/api/generated-captions/:id", requireUser, (req, res) => { const job = jobs.get(req.params.id); if (!job?.captionsPath || job.userId !== req.user.id) return res.status(404).send("Captions not found."); res.type("text/plain").sendFile(job.captionsPath); });
 
 setInterval(async () => {
