@@ -691,6 +691,22 @@ async function streamVideo(req, res) {
 }
 app.head("/api/generated-video/:id", requireUser, streamVideo);
 app.get("/api/generated-video/:id", requireUser, streamVideo);
+app.get("/api/video-debug/:id", requireUser, async (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job || job.userId !== req.user.id) return res.status(404).json({ error: "Video job not found." });
+  const out = { status: job.status, progress: job.progress, message: job.message, hasFinalPath: !!job.finalPath };
+  if (job.finalPath) {
+    try {
+      const stat = await fs.stat(job.finalPath);
+      out.size = stat.size;
+      out.contentType = "video/mp4";
+      out.url = `/api/generated-video/${req.params.id}`;
+    } catch (e) {
+      out.fileError = "Final video file is no longer present on this server instance.";
+    }
+  }
+  res.json(out);
+});
 app.get("/api/generated-captions/:id", requireUser, (req, res) => { const job = jobs.get(req.params.id); if (!job?.captionsPath || job.userId !== req.user.id) return res.status(404).send("Captions not found."); res.type("text/plain").sendFile(job.captionsPath); });
 
 setInterval(async () => {

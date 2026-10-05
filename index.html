@@ -89,28 +89,74 @@ async function generateVideo(){
  document.getElementById('outputSpec').textContent=`${durationSeconds}s • ${aspectRatio}`;
  status('Starting your Short…','WORKING');progress(4,'Planning connected scenes…');
  try{const r=await fetch('/api/generate-video',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({idea,style,aspectRatio,durationSeconds})});const d=await r.json();if(!r.ok)throw new Error(d.error||'Could not start generation.');poll(d.jobId)}catch(e){showError(e.message);btn.disabled=false}}
-async function poll(id){try{const r=await fetch('/api/video-status/'+encodeURIComponent(id));const d=await r.json();if(d.status==='failed'||!r.ok)throw new Error(d.error||'Video generation failed.');progress(d.progress||0,d.message||'Generating…');status(d.status==='completed'?'Complete…':'Generating…',d.status==='completed'?'DONE':'WORKING');if(d.status==='completed'){
- progress(97,'Loading your finished video into the player…');
+async function loadCompletedVideo(jobId, d){
  const vid=document.getElementById('video');
  const videoUrl=d.videoUrl+'?t='+Date.now();
- vid.src=videoUrl;
- vid.load();
+ const capUrl=d.captionsUrl+'?t='+Date.now();
  document.getElementById('download').href=videoUrl;
  document.getElementById('openVideo').href=videoUrl;
- document.getElementById('captions').href=d.captionsUrl+'?t='+Date.now();
+ document.getElementById('captions').href=capUrl;
+ document.getElementById('videoWrap').style.display='flex';
  document.getElementById('videoEmpty').style.display='none';
  document.getElementById('videoOverlay').style.display='block';
- document.getElementById('videoWrap').style.display='flex';
- status('Ready to watch','DONE');
- progress(100,'Your Short is ready.');
- // Let the browser stream the MP4 directly. Do not wait for a full-file fetch.
- const ready=()=>{document.getElementById('state').textContent='Ready to watch'};
- const fail=()=>showError('The MP4 was created, but your browser could not play it. Use Open video to test the file directly.');
- vid.addEventListener('loadedmetadata',ready,{once:true});
- vid.addEventListener('error',fail,{once:true});
- progress(100,d.message||'Your Short is ready.');status('Ready to watch','DONE');document.getElementById('generate').disabled=false;
- return
-}timer=setTimeout(()=>poll(id),1000)}catch(e){showError(e.message);document.getElementById('generate').disabled=false}}
+ document.getElementById('outputSpec').textContent=`${d.durationSeconds||''}s • 480p`;
+ status('Opening your Short…','LOADING');
+ progress(98,'Opening your finished video…');
+ let objectUrl=null;
+ const showPlayer=()=>{
+   vid.style.display='block';
+   document.getElementById('videoEmpty').style.display='none';
+   document.getElementById('videoOverlay').style.display='block';
+   document.getElementById('videoWrap').style.display='flex';
+   status('Ready to watch','DONE');
+   progress(100,d.message||'Your Short is ready.');
+ };
+ vid.onloadedmetadata=showPlayer;
+ vid.oncanplay=showPlayer;
+ vid.onerror=async()=>{
+   // Try fetching the protected file explicitly with the signed-in session.
+   // This also gives us a useful error instead of leaving the placeholder up.
+   try{
+     const r=await fetch(d.videoUrl,{credentials:'include',cache:'no-store'});
+     if(!r.ok) throw new Error(`Video server returned HTTP ${r.status}.`);
+     const type=r.headers.get('content-type')||'';
+     if(!type.includes('video/mp4')) throw new Error(`Video server returned ${type||'an unknown content type'} instead of video/mp4.`);
+     const blob=await r.blob();
+     objectUrl=URL.createObjectURL(blob);
+     vid.src=objectUrl; vid.load();
+     document.getElementById('openVideo').href=objectUrl;
+     return;
+   }catch(e){
+     showError(`The AI finished the video, but the browser could not load it. ${e.message}`);
+   }
+ };
+ // Set source and force a fresh load.
+ vid.preload='metadata';
+ vid.controls=true;
+ vid.src=videoUrl;
+ try{vid.load()}catch{}
+ // Verify the server-side file shortly after completion. Do not wait for a full download.
+ setTimeout(async()=>{
+   if(vid.readyState===0 && !vid.error){
+     try{
+       const r=await fetch('/api/video-debug/'+encodeURIComponent(jobId),{credentials:'include',cache:'no-store'});
+       const info=await r.json();
+       if(!info.hasFinalPath) showError(info.fileError||'The generated MP4 is no longer available on this Render instance.');
+     }catch{}
+   }
+ },2200);
+}
+async function poll(id){
+ try{
+  const r=await fetch('/api/video-status/'+encodeURIComponent(id),{credentials:'include',cache:'no-store'});
+  const d=await r.json();
+  if(d.status==='failed'||!r.ok) throw new Error(d.error||'Video generation failed.');
+  progress(d.progress||0,d.message||'Generating…');
+  status(d.status==='completed'?'Complete…':'Generating…',d.status==='completed'?'DONE':'WORKING');
+  if(d.status==='completed'){await loadCompletedVideo(id,d);document.getElementById('generate').disabled=false;return}
+  timer=setTimeout(()=>poll(id),1000);
+ }catch(e){showError(e.message);document.getElementById('generate').disabled=false}
+}
 async function checkout(plan){try{const me=await fetch('/api/auth/me');if(!me.ok){location.href='/account?next='+encodeURIComponent(plan);return}const r=await fetch('/api/create-checkout-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({plan})});const d=await r.json();if(d.url)location.href=d.url;else alert(d.error||'Could not start checkout.')}catch(e){alert('Payment setup is not connected.')}}
 async function loadPlan(){try{const r=await fetch('/api/auth/me');if(!r.ok)return;const d=await r.json();const paid=d.user.plan==='creator'||d.user.plan==='pro';const wrap=document.getElementById('durationWrap');if(paid){wrap.style.display='block';document.getElementById('generate').textContent='Generate AI Short ✨';document.getElementById('stageRes').textContent='480P';document.getElementById('msg').textContent=`${d.user.plan.toUpperCase()} plan: choose 5–30 seconds. ${d.usage.remaining} remaining this month.`}else{wrap.style.display='none';document.getElementById('stageRes').textContent='360P';document.getElementById('generate').textContent='Generate 10-second free Short ✨';document.getElementById('msg').textContent='Free preview: 10 seconds at 360p delivery.'}}catch{}}loadPlan();
 document.getElementById('video').addEventListener('timeupdate',()=>{const v=document.getElementById('video');const t=Math.floor(v.currentTime||0);const mm=String(Math.floor(t/60)).padStart(2,'0'),ss=String(t%60).padStart(2,'0');document.getElementById('videoTime').textContent=`${mm}:${ss}`});
