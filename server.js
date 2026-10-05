@@ -383,6 +383,7 @@ async function initDb() {
       narration_script TEXT,
       subject_action TEXT,
       voice_emotion TEXT NOT NULL DEFAULT 'excited',
+      voice_direction TEXT NOT NULL DEFAULT '',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       completed_at TIMESTAMPTZ
     );
@@ -392,6 +393,7 @@ async function initDb() {
     ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS narration_script TEXT;
     ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS subject_action TEXT;
     ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS voice_emotion TEXT NOT NULL DEFAULT 'excited';
+    ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS voice_direction TEXT NOT NULL DEFAULT '';
     CREATE INDEX IF NOT EXISTS video_generations_user_created_idx ON video_generations(user_id, created_at);
   `);
   await db.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS complimentary_pro BOOLEAN NOT NULL DEFAULT FALSE");
@@ -406,7 +408,7 @@ async function usageForUser(user) {
   const count = Number((await db.query(query, [user.id])).rows[0]?.count || 0);
   return { used: count, limit, remaining: Math.max(0, limit - count), period, plan: user.plan };
 }
-async function reserveGeneration(user, idea, style, aspectRatio, requestedDuration, narrationScript, subjectAction, voiceEmotion) {
+async function reserveGeneration(user, idea, style, aspectRatio, requestedDuration, narrationScript, subjectAction, voiceEmotion, voiceDirection) {
   requireDb();
   const client = await db.connect();
   try {
@@ -431,7 +433,7 @@ async function reserveGeneration(user, idea, style, aspectRatio, requestedDurati
       return { ok: false, usage: { used: count, limit, remaining: 0, period, plan: freshPlan } };
     }
     const jobId = crypto.randomUUID();
-    await client.query("INSERT INTO video_generations(job_id,user_id,idea,style,aspect_ratio,duration_seconds,status,narration_script,subject_action,voice_emotion) VALUES($1,$2,$3,$4,$5,$6,'queued',$7,$8,$9)", [jobId, user.id, idea, style, aspectRatio, selectedDuration, narrationScript, subjectAction, voiceEmotion]);
+    await client.query("INSERT INTO video_generations(job_id,user_id,idea,style,aspect_ratio,duration_seconds,status,narration_script,subject_action,voice_emotion,voice_direction) VALUES($1,$2,$3,$4,$5,$6,'queued',$7,$8,$9,$10)", [jobId, user.id, idea, style, aspectRatio, selectedDuration, narrationScript, subjectAction, voiceEmotion, voiceDirection]);
     await client.query("COMMIT");
     return { ok: true, jobId, totalDuration: selectedDuration, usage: { used: ownerBypass ? count : count + 1, limit, remaining: ownerBypass ? 9999 : Math.max(0, limit - count - 1), period, plan: effectiveForGeneration }, ownerBypass };
   } catch (err) {
@@ -454,6 +456,21 @@ function cleanAction(value) {
 function cleanEmotion(value) {
   const emotion = String(value || "").toLowerCase();
   return VOICE_EMOTIONS.has(emotion) ? emotion : "excited";
+}
+function cleanVoiceDirection(value) {
+  return String(value || "").replace(/[<>]/g, "").replace(/[\r\n]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 300);
+}
+function voiceDirectionMarkup(direction) {
+  const d = String(direction || "").toLowerCase();
+  const marks = [];
+  if (/whisper|whispering|very quiet|hushed/.test(d)) marks.push("[whisper]");
+  else if (/shout|yell|scream|loud|booming/.test(d)) marks.push("[shout]");
+  if (/nervous|anxious|scared|afraid|terrified|fearful|panicked/.test(d)) marks.push("[fearful]");
+  else if (/angry|furious|rage|mad|aggressive/.test(d)) marks.push("[angry]");
+  else if (/surprised|shocked|astonished|amazed/.test(d)) marks.push("[surprised]");
+  else if (/happy|joyful|cheerful|playful|excited|energetic/.test(d)) marks.push("[happy]");
+  if (/sad|heartbroken|crying|tearful|melancholy/.test(d)) marks.push("[sad]");
+  return marks.slice(0, 2).join("");
 }
 function fitScriptToDuration(text, totalDuration) {
   const clean = cleanScript(text);
@@ -478,9 +495,9 @@ function emotionMarkup(emotion) {
     default: return "[happy]";
   }
 }
-function applyVoiceEmotion(script, emotion) {
+function applyVoiceEmotion(script, emotion, voiceDirection = "") {
   const clean = fitScriptToDuration(script, 30).replace(/[\r\n]+/g, " ").trim();
-  const mark = emotionMarkup(emotion);
+  const mark = voiceDirectionMarkup(voiceDirection) || emotionMarkup(emotion);
   if (!clean) return mark ? `${mark}Hi there.` : "Hi there.";
   const sentences = clean.split(/(?<=[.!?])\s+/).filter(Boolean);
   const joined = sentences.join(" <break time=\"250ms\" /> ");
@@ -524,10 +541,10 @@ function outputUrl(output) {
   if (output && typeof output.url === "string") return output.url;
   throw new Error("The video provider returned an unexpected output.");
 }
-async function generateNarration(text, emotion = "excited") {
+async function generateNarration(text, emotion = "excited", voiceDirection = "") {
   if (!replicate) throw new Error("Replicate is not configured.");
   const out = await replicate.run(TTS_MODEL, { input: {
-    text: applyVoiceEmotion(text, emotion),
+    text: applyVoiceEmotion(text, emotion, voiceDirection),
     language: "en",
     voice_id: TTS_VOICE_ID,
     sample_rate: 48000,
@@ -959,7 +976,7 @@ async function extractLastFrame(videoPath, imagePath) {
   await ffmpegRun(["-y", "-sseof", "-0.08", "-i", videoPath, "-frames:v", "1", "-q:v", "2", imagePath]);
 }
 
-async function generateJob(jobId, idea, style, aspectRatio, plan, totalDuration, narrationScript, subjectAction, voiceEmotion) {
+async function generateJob(jobId, idea, style, aspectRatio, plan, totalDuration, narrationScript, subjectAction, voiceEmotion, voiceDirection) {
   const job = jobs.get(jobId); if (!job) return;
   const isFree = plan === "free";
   const safeDuration = isFree ? 10 : Math.max(5, Math.min(30, Number(totalDuration) || 30));
@@ -1013,7 +1030,7 @@ async function generateJob(jobId, idea, style, aspectRatio, plan, totalDuration,
 
     job.progress = 62; job.message = "Generating low-cost voice narration…";
     const narrationText = narrationScript || narrationForDuration(idea, safeDuration);
-    const narrationUrl = await generateNarration(fitScriptToDuration(narrationText, safeDuration), voiceEmotion);
+    const narrationUrl = await generateNarration(fitScriptToDuration(narrationText, safeDuration), voiceEmotion, voiceDirection);
     const audioPath = path.join(dir, "narration.mp3");
     await downloadTo(narrationUrl, audioPath);
     const listPath = path.join(dir, "concat.txt");
@@ -1110,16 +1127,17 @@ app.post("/api/generate-video", sameOrigin, requireUser, rateLimit("video", { wi
   const narrationScript = cleanScript(req.body?.narrationScript);
   const subjectAction = cleanAction(req.body?.subjectAction);
   const voiceEmotion = cleanEmotion(req.body?.voiceEmotion);
+  const voiceDirection = cleanVoiceDirection(req.body?.voiceDirection);
   if (!idea) return res.status(400).json({ error: "Enter an idea first." });
   if (!replicate) return res.status(503).json({ error: "AI video is not configured yet. Add REPLICATE_API_TOKEN to Render." });
   if (!db) return res.status(503).json({ error: "Accounts are not configured yet. Add DATABASE_URL to Render." });
   if (jobs.size > 10) return res.status(429).json({ error: "The generator is busy. Try again in a minute." });
   try {
-    const reservation = await reserveGeneration(req.user, idea, style, aspectRatio, requestedDuration, narrationScript, subjectAction, voiceEmotion);
+    const reservation = await reserveGeneration(req.user, idea, style, aspectRatio, requestedDuration, narrationScript, subjectAction, voiceEmotion, voiceDirection);
     if (reservation.invalidDuration) return res.status(400).json({ error: "Paid video duration must be between 5 and 30 seconds." });
     if (!reservation.ok) return res.status(429).json({ error: `You've used all ${reservation.usage.limit} video generation(s) for this ${reservation.usage.period}.`, usage: reservation.usage });
     jobs.set(reservation.jobId, { status: "queued", progress: 2, message: "Queued…", createdAt: Date.now(), userId: req.user.id, plan: reservation.usage.plan, totalDuration: reservation.totalDuration, ownerBypass: !!reservation.ownerBypass });
-    generateJob(reservation.jobId, idea, style, aspectRatio, reservation.usage.plan, reservation.totalDuration, narrationScript, subjectAction, voiceEmotion);
+    generateJob(reservation.jobId, idea, style, aspectRatio, reservation.usage.plan, reservation.totalDuration, narrationScript, subjectAction, voiceEmotion, voiceDirection);
     res.status(202).json({ jobId: reservation.jobId, usage: reservation.usage, durationSeconds: reservation.totalDuration });
   } catch (err) { console.error(err); res.status(500).json({ error: "Could not start video generation." }); }
 });
