@@ -62,18 +62,35 @@ function planLimit(plan) {
   return { period: "day", limit: FREE_VIDEOS_PER_DAY };
 }
 
-function scryptAsync(password, salt) {
-  return new Promise((resolve, reject) => crypto.scrypt(password, salt, 64, { N: 32768, r: 8, p: 1 }, (err, key) => err ? reject(err) : resolve(key.toString("hex"))));
+function pbkdf2Async(password, salt) {
+  return new Promise((resolve, reject) =>
+    crypto.pbkdf2(
+      password,
+      salt,
+      100000,
+      32,
+      "sha256",
+      (err, key) => err ? reject(err) : resolve(key.toString("hex"))
+    )
+  );
 }
 async function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString("hex");
-  return `scrypt$${salt}$${await scryptAsync(password, salt)}`;
+  return `pbkdf2$${salt}$${await pbkdf2Async(password, salt)}`;
 }
 async function verifyPassword(password, encoded) {
-  const [, salt, stored] = String(encoded).split("$");
+  const [algorithm, salt, stored] = String(encoded).split("$");
   if (!salt || !stored) return false;
-  const derived = await scryptAsync(password, salt);
-  return derived.length === stored.length && crypto.timingSafeEqual(Buffer.from(derived), Buffer.from(stored));
+  if (algorithm !== "pbkdf2") {
+    // Older account records from the MVP used scrypt. They are intentionally
+    // not verified here because that configuration can exceed memory limits
+    // on the free Render instance. Users with legacy records can reset their
+    // password through a future account-recovery flow.
+    return false;
+  }
+  const derived = await pbkdf2Async(password, salt);
+  return derived.length === stored.length &&
+    crypto.timingSafeEqual(Buffer.from(derived), Buffer.from(stored));
 }
 
 async function createUserSession(res, userId) {
@@ -293,6 +310,16 @@ app.get("/api/auth/me", async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: "Account service is unavailable." }); }
 });
 app.get("/api/account/usage", requireUser, async (req, res) => { res.json({ user: publicUser(req.user), usage: await usageForUser(req.user) }); });
+
+app.get("/api/health", async (req, res) => {
+  try {
+    if (!db) return res.status(503).json({ ok: false, database: false, error: "DATABASE_URL is missing." });
+    await db.query("SELECT 1");
+    res.json({ ok: true, database: true });
+  } catch (err) {
+    res.status(503).json({ ok: false, database: false });
+  }
+});
 
 app.post("/api/create-checkout-session", requireUser, async (req, res) => {
   const plan = req.body?.plan;

@@ -43,3 +43,12 @@ For a broad public launch, add email verification, password reset, CSRF/origin p
 Neon Free plan (Oct. 2, 2026): https://neon.com/blog/neon-free-plan-1-gb-per-project
 Neon Postgres connection strings: https://neon.com/blog/authenticating-users-in-astro-using-neon-postgres-and-lucia-auth
 Render free services and ephemeral storage: https://render.com/docs/free
+
+
+## Signup fix
+
+This build also fixes account creation on small Render instances by adjusting the Node `scrypt` memory settings so password hashing does not exceed Node's default memory limit.
+
+
+## Signup error fix
+The account-password hashing implementation now uses Node PBKDF2-SHA256 instead of memory-heavy scrypt, which avoids `ERR_CRYPTO_INVALID_SCRYPT_PARAMS` on small/free Render instances.
