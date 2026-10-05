@@ -23,13 +23,14 @@ const COOKIE_SECRET = process.env.COOKIE_SECRET || ADMIN_PASSWORD;
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
 const replicate = process.env.REPLICATE_API_TOKEN ? new Replicate({ auth: process.env.REPLICATE_API_TOKEN }) : null;
 const priceIds = { creator: process.env.STRIPE_PRICE_CREATOR, pro: process.env.STRIPE_PRICE_PRO };
-const VIDEO_MODEL = process.env.VIDEO_MODEL || "wan-video/wan-2.2-5b-fast";
+const VIDEO_MODEL = "wan-video/wan-2.2-5b-fast";
 const TTS_MODEL = process.env.TTS_MODEL || "inworld/realtime-tts-1.5-mini";
 const FREE_VIDEOS_PER_DAY = Math.max(1, Number(process.env.FREE_VIDEOS_PER_DAY || 1));
 const CREATOR_VIDEOS_PER_MONTH = Math.max(1, Number(process.env.CREATOR_VIDEOS_PER_MONTH || 10));
 const PRO_VIDEOS_PER_MONTH = Math.max(1, Number(process.env.PRO_VIDEOS_PER_MONTH || 24));
 const OWNER_EMAIL = normalizeEmail(process.env.OWNER_EMAIL || "");
 const OWNER_ACCESS_CODE = String(process.env.OWNER_ACCESS_CODE || "");
+const OWNER_BYPASS_LIMITS = String(process.env.OWNER_BYPASS_LIMITS || "true").toLowerCase() === "true";
 
 const db = process.env.DATABASE_URL ? new Pool({ connectionString: process.env.DATABASE_URL, max: 5 }) : null;
 const jobs = new Map();
@@ -218,8 +219,10 @@ async function reserveGeneration(user, idea, style, aspectRatio, requestedDurati
     await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [user.id]);
     const fresh = (await client.query("SELECT * FROM users WHERE id=$1 FOR UPDATE", [user.id])).rows[0];
     const freshPlan = effectivePlanForUser(fresh);
-    const { period, limit } = planLimit(freshPlan);
-    const selectedDuration = freshPlan === "free" ? 10 : normalizePaidDuration(requestedDuration);
+    const ownerBypass = OWNER_BYPASS_LIMITS && isOwnerAccount(fresh);
+    const effectiveForGeneration = ownerBypass ? "pro" : freshPlan;
+    const { period, limit } = planLimit(effectiveForGeneration);
+    const selectedDuration = effectiveForGeneration === "free" ? 10 : normalizePaidDuration(requestedDuration);
     if (freshPlan !== "free" && !selectedDuration) {
       await client.query("ROLLBACK");
       return { ok: false, invalidDuration: true };
@@ -228,14 +231,14 @@ async function reserveGeneration(user, idea, style, aspectRatio, requestedDurati
       ? "SELECT COUNT(*)::int AS count FROM video_generations WHERE user_id=$1 AND created_at >= date_trunc('day', NOW()) AND status IN ('queued','generating','completed')"
       : "SELECT COUNT(*)::int AS count FROM video_generations WHERE user_id=$1 AND created_at >= date_trunc('month', NOW()) AND status IN ('queued','generating','completed')";
     const count = Number((await client.query(query, [user.id])).rows[0]?.count || 0);
-    if (count >= limit) {
+    if (!ownerBypass && count >= limit) {
       await client.query("ROLLBACK");
       return { ok: false, usage: { used: count, limit, remaining: 0, period, plan: freshPlan } };
     }
     const jobId = crypto.randomUUID();
     await client.query("INSERT INTO video_generations(job_id,user_id,idea,style,aspect_ratio,duration_seconds,status) VALUES($1,$2,$3,$4,$5,$6,'queued')", [jobId, user.id, idea, style, aspectRatio, selectedDuration]);
     await client.query("COMMIT");
-    return { ok: true, jobId, totalDuration: selectedDuration, usage: { used: count + 1, limit, remaining: Math.max(0, limit - count - 1), period, plan: freshPlan } };
+    return { ok: true, jobId, totalDuration: selectedDuration, usage: { used: ownerBypass ? count : count + 1, limit, remaining: ownerBypass ? 9999 : Math.max(0, limit - count - 1), period, plan: effectiveForGeneration }, ownerBypass };
   } catch (err) {
     await client.query("ROLLBACK"); throw err;
   } finally { client.release(); }
@@ -552,7 +555,7 @@ async function generateJob(jobId, idea, style, aspectRatio, plan, totalDuration)
   const job = jobs.get(jobId); if (!job) return;
   const isFree = plan === "free";
   const safeDuration = isFree ? 10 : Math.max(5, Math.min(30, Number(totalDuration) || 30));
-  const sceneDurations = isFree ? [10] : clipDurationsForTotal(safeDuration);
+  const sceneDurations = clipDurationsForTotal(safeDuration);
   const sceneCount = sceneDurations.length;
   const providerResolution = "480p";
   const outputWidth = aspectRatio === "9:16" ? (isFree ? 360 : 480) : (isFree ? 640 : 854);
@@ -561,6 +564,7 @@ async function generateJob(jobId, idea, style, aspectRatio, plan, totalDuration)
     if (!replicate) throw new Error("AI video is not configured. Add REPLICATE_API_TOKEN to Render Environment Variables.");
     if (db) await db.query("UPDATE video_generations SET status='generating' WHERE job_id=$1", [jobId]);
     job.status = "generating"; job.progress = 5;
+    console.log(`[video ${jobId}] model=${VIDEO_MODEL} resolution=${providerResolution} duration=${safeDuration}s scenes=${sceneCount}`);
     job.message = isFree ? "Creating your 10-second free preview…" : `Creating your ${safeDuration}-second Short in ${sceneCount} connected scene${sceneCount === 1 ? "" : "s"}…`;
 
     const storyPlan = buildStoryPlan(idea, style, sceneCount);
@@ -582,7 +586,7 @@ async function generateJob(jobId, idea, style, aspectRatio, plan, totalDuration)
         aspect_ratio: aspectRatio,
         frames_per_second: 16,
         go_fast: true,
-        sample_shift: Number(process.env.WAN_SAMPLE_SHIFT || 12),
+        sample_shift: Math.max(1, Math.min(20, Number(process.env.WAN_SAMPLE_SHIFT || 12))),
         optimize_prompt: false,
         disable_safety_checker: false
       };
@@ -647,6 +651,34 @@ async function generateJob(jobId, idea, style, aspectRatio, plan, totalDuration)
     if (db) await db.query("UPDATE video_generations SET status='failed', error=$2 WHERE job_id=$1", [jobId, job.error]);
   }
 }
+app.get("/api/generator-status", requireUser, async (req, res) => {
+  try {
+    requireDb();
+    const row = (await db.query("SELECT * FROM users WHERE id=$1", [req.user.id])).rows[0];
+    if (!row) return res.status(404).json({ error: "Account not found." });
+    const plan = effectivePlanForUser(row);
+    const owner = OWNER_BYPASS_LIMITS && isOwnerAccount(row);
+    const { period, limit } = planLimit(owner ? "pro" : plan);
+    const query = period === "day"
+      ? "SELECT COUNT(*)::int AS count FROM video_generations WHERE user_id=$1 AND created_at >= date_trunc('day', NOW()) AND status IN ('queued','generating','completed')"
+      : "SELECT COUNT(*)::int AS count FROM video_generations WHERE user_id=$1 AND created_at >= date_trunc('month', NOW()) AND status IN ('queued','generating','completed')";
+    const used = Number((await db.query(query, [req.user.id])).rows[0]?.count || 0);
+    res.json({
+      ok: true,
+      model: VIDEO_MODEL,
+      resolution: "480p",
+      freeDurationSeconds: 10,
+      paidDurationRange: [5, 30],
+      plan,
+      ownerBypass: owner,
+      usage: { used, limit, remaining: owner ? 9999 : Math.max(0, limit - used), period }
+    });
+  } catch (err) {
+    console.error("Generator status error", err);
+    res.status(500).json({ error: "Could not inspect generator status." });
+  }
+});
+
 app.post("/api/generate-video", sameOrigin, requireUser, rateLimit("video", { windowMs: 10 * 60 * 1000, max: 6, keyFn: req => req.user.id }), async (req, res) => {
   const idea = cleanIdea(req.body?.idea);
   const style = STYLE_OPTIONS.has(req.body?.style) ? req.body.style : "Fast & viral";
@@ -660,7 +692,7 @@ app.post("/api/generate-video", sameOrigin, requireUser, rateLimit("video", { wi
     const reservation = await reserveGeneration(req.user, idea, style, aspectRatio, requestedDuration);
     if (reservation.invalidDuration) return res.status(400).json({ error: "Paid video duration must be between 5 and 30 seconds." });
     if (!reservation.ok) return res.status(429).json({ error: `You've used all ${reservation.usage.limit} video generation(s) for this ${reservation.usage.period}.`, usage: reservation.usage });
-    jobs.set(reservation.jobId, { status: "queued", progress: 2, message: "Queued…", createdAt: Date.now(), userId: req.user.id, plan: reservation.usage.plan, totalDuration: reservation.totalDuration });
+    jobs.set(reservation.jobId, { status: "queued", progress: 2, message: "Queued…", createdAt: Date.now(), userId: req.user.id, plan: reservation.usage.plan, totalDuration: reservation.totalDuration, ownerBypass: !!reservation.ownerBypass });
     generateJob(reservation.jobId, idea, style, aspectRatio, reservation.usage.plan, reservation.totalDuration);
     res.status(202).json({ jobId: reservation.jobId, usage: reservation.usage, durationSeconds: reservation.totalDuration });
   } catch (err) { console.error(err); res.status(500).json({ error: "Could not start video generation." }); }

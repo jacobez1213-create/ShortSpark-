@@ -37,7 +37,7 @@ radial-gradient(circle at 50% 18%,#241c45,transparent 38%),#05060b}
 <nav class="nav"><a class="logo" href="/">Short<i>Spark</i></a><div class="links"><a href="#generator">Generator</a><a href="#pricing">Pricing</a><a href="/account">Account</a><a href="/admin">Developer</a></div><a class="btn" href="#generator">Create a Short</a></nav>
 <header class="hero"><span class="pill">🎬 AI video generation</span><h1>Turn one idea into a <span class="grad">Short worth posting.</span></h1><p>Free users get a 10-second 360p preview. Creator and Pro can choose 5–30 seconds at 480p with fast AI generation.</p><div class="actions"><a class="btn" href="#generator">Generate a video →</a><a class="btn alt" href="#pricing">See plans</a></div></header>
 <section class="section" id="generator"><h2>AI Video Generator</h2><p class="sub">Sign in to generate. Free accounts get 1 short per day at 10 seconds/360p; paid plans can choose any length from 5–30 seconds within their monthly limits.</p>
-<div class="generator"><div class="panel"><label class="label">YOUR IDEA</label><textarea id="idea" class="input" placeholder="A text message arrives from tomorrow telling me not to go home..."></textarea><div class="row"><div><label class="label">STYLE</label><select id="style"><option>Fast & viral</option><option>Storytelling</option><option>Funny</option><option>Mysterious</option><option>Educational</option></select></div><div><label class="label">FORMAT</label><select id="aspect"><option value="9:16">Vertical 9:16</option><option value="16:9">Landscape 16:9</option></select></div></div><div id="durationWrap" style="display:none;margin-top:14px"><label class="label">VIDEO LENGTH <span style="font-weight:700;color:#8d95ab">Paid plans only</span></label><select id="duration"><option value="5">5 seconds</option><option value="6">6 seconds</option><option value="7">7 seconds</option><option value="8">8 seconds</option><option value="9">9 seconds</option><option value="10">10 seconds</option><option value="11">11 seconds</option><option value="12">12 seconds</option><option value="13">13 seconds</option><option value="14">14 seconds</option><option value="15">15 seconds</option><option value="16">16 seconds</option><option value="17">17 seconds</option><option value="18">18 seconds</option><option value="19">19 seconds</option><option value="20">20 seconds</option><option value="21">21 seconds</option><option value="22">22 seconds</option><option value="23">23 seconds</option><option value="24">24 seconds</option><option value="25">25 seconds</option><option value="26">26 seconds</option><option value="27">27 seconds</option><option value="28">28 seconds</option><option value="29">29 seconds</option><option value="30" selected>30 seconds</option></select><p class="small" style="margin:7px 0 0">Paid plans only. Shorter videos automatically use fewer connected scenes while preserving the same subject, setting, and story.</p></div><button id="generate" class="btn full" onclick="generateVideo()">Generate AI Short ✨</button><div class="notice">Free: 10s / 360p delivery. Creator & Pro: 5–30s / 480p fast generation. The server enforces the paid-only duration limit.</div></div>
+<div class="generator"><div class="panel"><label class="label">YOUR IDEA</label><textarea id="idea" class="input" placeholder="A text message arrives from tomorrow telling me not to go home..."></textarea><div class="row"><div><label class="label">STYLE</label><select id="style"><option>Fast & viral</option><option>Storytelling</option><option>Funny</option><option>Mysterious</option><option>Educational</option></select></div><div><label class="label">FORMAT</label><select id="aspect"><option value="9:16">Vertical 9:16</option><option value="16:9">Landscape 16:9</option></select></div></div><div id="durationWrap" style="display:none;margin-top:14px"><label class="label">VIDEO LENGTH <span style="font-weight:700;color:#8d95ab">Paid plans only</span></label><select id="duration"><option value="5">5 seconds</option><option value="6">6 seconds</option><option value="7">7 seconds</option><option value="8">8 seconds</option><option value="9">9 seconds</option><option value="10">10 seconds</option><option value="11">11 seconds</option><option value="12">12 seconds</option><option value="13">13 seconds</option><option value="14">14 seconds</option><option value="15">15 seconds</option><option value="16">16 seconds</option><option value="17">17 seconds</option><option value="18">18 seconds</option><option value="19">19 seconds</option><option value="20">20 seconds</option><option value="21">21 seconds</option><option value="22">22 seconds</option><option value="23">23 seconds</option><option value="24">24 seconds</option><option value="25">25 seconds</option><option value="26">26 seconds</option><option value="27">27 seconds</option><option value="28">28 seconds</option><option value="29">29 seconds</option><option value="30" selected>30 seconds</option></select><p class="small" style="margin:7px 0 0">Paid plans only. Shorter videos automatically use fewer connected scenes while preserving the same subject, setting, and story.</p></div><button id="generate" type="button" class="btn full">Generate AI Short ✨</button><div class="notice">Free: 10s / 360p delivery. Creator & Pro: 5–30s / 480p fast generation with Wan 2.2 5B. The server enforces the paid-only duration limit.</div></div>
 <div class="panel gen-stage">
   <div class="stage-head">
     <div class="stage-title"><span class="live-dot"></span><strong id="state">Ready to generate</strong></div>
@@ -70,94 +70,4 @@ radial-gradient(circle at 50% 18%,#241c45,transparent 38%),#05060b}
 <section class="section"><h2>What it creates</h2><p class="sub">The generator now goes beyond scripts and produces a real previewable video.</p><div class="cards"><div class="card">🎥<h3>3 connected scenes</h3><p>Each clip advances the same idea instead of producing unrelated shots.</p></div><div class="card">🔊<h3>Synchronized audio</h3><p>The selected model can generate dialogue, music and sound effects with the video.</p></div><div class="card">📱<h3>Short-form ready</h3><p>Vertical 9:16 is the default for Shorts, TikTok and Reels.</p></div></div></section>
 <section class="section" id="pricing"><h2>Creator plans</h2><p class="sub">Your existing Stripe subscriptions stay connected.</p><div class="prices"><div class="price"><h3>Free</h3><div class="amt">$0 <small>/ month</small></div><ul><li>1 video per day</li><li>10 seconds</li><li>360p delivery</li></ul><a class="btn alt" href="#generator">Try it</a></div><div class="price hot"><h3>Creator</h3><div class="amt">$8.99 <small>/ month</small></div><ul><li>10 videos / month</li><li>30-second videos</li><li>480p delivery</li><li>Premium styles</li></ul><button class="btn" onclick="checkout('creator')">Subscribe with Stripe →</button></div><div class="price"><h3>Pro</h3><div class="amt">$15.99 <small>/ month</small></div><ul><li>24 videos / month</li><li>30-second videos</li><li>480p delivery</li><li>Brand presets</li></ul><button class="btn alt" onclick="checkout('pro')">Subscribe with Stripe →</button></div></div></section>
 <footer>© 2026 ShortSpark · <a href="/admin">Developer dashboard</a></footer>
-<script>
-let timer;
-function safe(s){return String(s||'').replace(/[<>]/g,'').trim()}
-function status(state,badge){document.getElementById('state').textContent=state;document.getElementById('badge').textContent=badge}
-function progress(v,msg){
-  document.getElementById('bar').style.width=v+'%';
-  document.getElementById('msg').textContent=msg;
-  const parts=[document.getElementById('seg1'),document.getElementById('seg2'),document.getElementById('seg3'),document.getElementById('seg4')];
-  parts.forEach((p,i)=>p.style.width = Math.max(0,Math.min(100,(v-i*25)*4))+'%');
-}
-function showError(msg){const e=document.getElementById('error');e.textContent=msg;e.style.display='block';status('Error','ERROR')}
-async function generateVideo(){
- const idea=safe(document.getElementById('idea').value),style=document.getElementById('style').value,aspectRatio=document.getElementById('aspect').value;
- const wrap=document.getElementById('durationWrap'); const durationSeconds=wrap.style.display==='none'?10:Number(document.getElementById('duration').value);
- const btn=document.getElementById('generate'); if(!idea)return alert('Enter an idea first.'); btn.disabled=true;
- document.getElementById('videoWrap').style.display='none';document.getElementById('videoEmpty').style.display='flex';document.getElementById('videoOverlay').style.display='none';document.getElementById('error').style.display='none';
- document.getElementById('outputSpec').textContent=`${durationSeconds}s • ${aspectRatio}`;
- status('Starting your Short…','WORKING');progress(4,'Planning connected scenes…');
- try{const r=await fetch('/api/generate-video',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({idea,style,aspectRatio,durationSeconds})});const d=await r.json();if(!r.ok)throw new Error(d.error||'Could not start generation.');poll(d.jobId)}catch(e){showError(e.message);btn.disabled=false}}
-async function loadCompletedVideo(jobId, d){
- const vid=document.getElementById('video');
- const videoUrl=d.videoUrl+'?t='+Date.now();
- const capUrl=d.captionsUrl+'?t='+Date.now();
- document.getElementById('download').href=videoUrl;
- document.getElementById('openVideo').href=videoUrl;
- document.getElementById('captions').href=capUrl;
- document.getElementById('videoWrap').style.display='flex';
- document.getElementById('videoEmpty').style.display='none';
- document.getElementById('videoOverlay').style.display='block';
- document.getElementById('outputSpec').textContent=`${d.durationSeconds||''}s • 480p`;
- status('Opening your Short…','LOADING');
- progress(98,'Opening your finished video…');
- let objectUrl=null;
- const showPlayer=()=>{
-   vid.style.display='block';
-   document.getElementById('videoEmpty').style.display='none';
-   document.getElementById('videoOverlay').style.display='block';
-   document.getElementById('videoWrap').style.display='flex';
-   status('Ready to watch','DONE');
-   progress(100,d.message||'Your Short is ready.');
- };
- vid.onloadedmetadata=showPlayer;
- vid.oncanplay=showPlayer;
- vid.onerror=async()=>{
-   // Try fetching the protected file explicitly with the signed-in session.
-   // This also gives us a useful error instead of leaving the placeholder up.
-   try{
-     const r=await fetch(d.videoUrl,{credentials:'include',cache:'no-store'});
-     if(!r.ok) throw new Error(`Video server returned HTTP ${r.status}.`);
-     const type=r.headers.get('content-type')||'';
-     if(!type.includes('video/mp4')) throw new Error(`Video server returned ${type||'an unknown content type'} instead of video/mp4.`);
-     const blob=await r.blob();
-     objectUrl=URL.createObjectURL(blob);
-     vid.src=objectUrl; vid.load();
-     document.getElementById('openVideo').href=objectUrl;
-     return;
-   }catch(e){
-     showError(`The AI finished the video, but the browser could not load it. ${e.message}`);
-   }
- };
- // Set source and force a fresh load.
- vid.preload='metadata';
- vid.controls=true;
- vid.src=videoUrl;
- try{vid.load()}catch{}
- // Verify the server-side file shortly after completion. Do not wait for a full download.
- setTimeout(async()=>{
-   if(vid.readyState===0 && !vid.error){
-     try{
-       const r=await fetch('/api/video-debug/'+encodeURIComponent(jobId),{credentials:'include',cache:'no-store'});
-       const info=await r.json();
-       if(!info.hasFinalPath) showError(info.fileError||'The generated MP4 is no longer available on this Render instance.');
-     }catch{}
-   }
- },2200);
-}
-async function poll(id){
- try{
-  const r=await fetch('/api/video-status/'+encodeURIComponent(id),{credentials:'include',cache:'no-store'});
-  const d=await r.json();
-  if(d.status==='failed'||!r.ok) throw new Error(d.error||'Video generation failed.');
-  progress(d.progress||0,d.message||'Generating…');
-  status(d.status==='completed'?'Complete…':'Generating…',d.status==='completed'?'DONE':'WORKING');
-  if(d.status==='completed'){await loadCompletedVideo(id,d);document.getElementById('generate').disabled=false;return}
-  timer=setTimeout(()=>poll(id),1000);
- }catch(e){showError(e.message);document.getElementById('generate').disabled=false}
-}
-async function checkout(plan){try{const me=await fetch('/api/auth/me');if(!me.ok){location.href='/account?next='+encodeURIComponent(plan);return}const r=await fetch('/api/create-checkout-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({plan})});const d=await r.json();if(d.url)location.href=d.url;else alert(d.error||'Could not start checkout.')}catch(e){document.getElementById('compatNote').hidden=false;setTimeout(()=>document.getElementById('compatNote').hidden=true,7000);alert('Checkout could not be opened. Your browser or an extension may be blocking Stripe. Please allow Stripe Checkout for payments.')}}
-async function loadPlan(){try{const r=await fetch('/api/auth/me');if(!r.ok)return;const d=await r.json();const paid=d.user.plan==='creator'||d.user.plan==='pro';const wrap=document.getElementById('durationWrap');if(paid){wrap.style.display='block';document.getElementById('generate').textContent='Generate AI Short ✨';document.getElementById('stageRes').textContent='480P';document.getElementById('msg').textContent=`${d.user.plan.toUpperCase()} plan: choose 5–30 seconds. ${d.usage.remaining} remaining this month.`}else{wrap.style.display='none';document.getElementById('stageRes').textContent='360P';document.getElementById('generate').textContent='Generate 10-second free Short ✨';document.getElementById('msg').textContent='Free preview: 10 seconds at 360p delivery.'}}catch{}}loadPlan();
-document.getElementById('video').addEventListener('timeupdate',()=>{const v=document.getElementById('video');const t=Math.floor(v.currentTime||0);const mm=String(Math.floor(t/60)).padStart(2,'0'),ss=String(t%60).padStart(2,'0');document.getElementById('videoTime').textContent=`${mm}:${ss}`});
-</script><div id="compatNote" class="compat" hidden>ShortSpark uses first-party app requests. Your browser may still block Stripe Checkout if a privacy extension blocks Stripe; in that case, allow checkout.stripe.com for payments.</div></body></html>
+<script src="/app.js" defer></script><div id="compatNote" class="compat" hidden>ShortSpark uses first-party app requests. Your browser may still block Stripe Checkout if a privacy extension blocks Stripe; in that case, allow checkout.stripe.com for payments.</div></body></html>

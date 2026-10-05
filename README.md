@@ -68,3 +68,17 @@ Completed videos are now streamed directly to the browser with HTTP Range suppor
 ## Browser/ad-blocker compatibility
 
 ShortSpark does not load advertising scripts, tracking pixels, remote fonts, or third-party JavaScript in the customer UI. Application requests are first-party (`/api/...`). Stripe Checkout remains a necessary external service for payments and is opened as a top-level redirect; a browser extension that blocks Stripe can still prevent checkout, and this build reports that clearly rather than attempting to circumvent the user's blocker.
+
+
+## v2.5 button/generation reliability
+
+- The Generate button uses a direct event listener instead of inline HTML handlers.
+- It preflights account/quota state before starting a job and reports quota/auth/network errors visibly.
+- The server is hard-locked to Wan 2.2 5B Fast.
+- Free 10-second generation now uses connected clips because the provider caps a single clip at 121 frames.
+- `OWNER_BYPASS_LIMITS=true` lets the configured owner account test without plan-quota blocking.
+- `/api/generator-status` exposes non-secret diagnostics for the signed-in user's active model, resolution, plan and quota.
+
+
+## v2.6
+The generator UI JavaScript is served from a dedicated `/app.js` file with `defer`, instead of an inline script. This avoids browser/CSP/extension issues that can leave the Generate button inert.
