@@ -125,3 +125,10 @@ Creator and Pro controls now use first-party `/subscribe/creator` and `/subscrib
 
 ### AI support
 The support agent uses the OpenAI Responses API with `gpt-6-luna` by default for low-cost, high-volume support. Add `OPENAI_API_KEY` to Render Environment Variables to enable the live AI agent. The key is never sent to the browser.
+
+
+## v3.4 automatic Stripe price recovery
+
+Creator and Pro checkout no longer depend exclusively on the environment Price IDs. If a configured Price ID is stale, belongs to the wrong Stripe mode, or was deleted, the server automatically finds the active monthly Price attached to `ShortSpark Creator` or `ShortSpark Pro` in the SAME Stripe account/mode as `STRIPE_SECRET_KEY`.
+
+For live AI support, set `OPENAI_API_KEY`. The support model defaults to the current `gpt-6-luna` API model for cost-sensitive, high-volume support.

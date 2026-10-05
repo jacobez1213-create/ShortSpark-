@@ -42,6 +42,71 @@ If a user asks for a cancellation/refund, explain that they should use their Str
 
 const replicate = process.env.REPLICATE_API_TOKEN ? new Replicate({ auth: process.env.REPLICATE_API_TOKEN }) : null;
 const priceIds = { creator: process.env.STRIPE_PRICE_CREATOR, pro: process.env.STRIPE_PRICE_PRO };
+
+const stripePriceCache = new Map();
+
+function stripeProductNameForPlan(plan) {
+  return plan === "creator" ? "ShortSpark Creator" : plan === "pro" ? "ShortSpark Pro" : null;
+}
+
+async function resolveStripePriceId(plan) {
+  if (!stripe) return null;
+  if (!["creator", "pro"].includes(plan)) return null;
+
+  const now = Date.now();
+  const cached = stripePriceCache.get(plan);
+  if (cached && cached.expiresAt > now) return cached.id;
+
+  const configured = priceIds[plan];
+
+  // First use the configured Price ID when it is valid in the current
+  // Stripe account/mode and is an active monthly recurring price.
+  if (configured && configured.startsWith("price_")) {
+    try {
+      const price = await stripe.prices.retrieve(configured);
+      const valid = price.active !== false &&
+        price.type === "recurring" &&
+        price.recurring?.interval === "month";
+      if (valid) {
+        stripePriceCache.set(plan, { id: price.id, expiresAt: now + 5 * 60 * 1000 });
+        return price.id;
+      }
+      console.warn(`Configured ${plan} price ${configured} is not an active monthly recurring price; falling back to product lookup.`);
+    } catch (err) {
+      console.warn(`Configured ${plan} price ${configured} could not be retrieved; falling back to product lookup.`, err.message);
+    }
+  }
+
+  // Robust fallback: find the active monthly recurring price attached to
+  // the named ShortSpark product in the SAME Stripe mode as the secret key.
+  const productName = stripeProductNameForPlan(plan);
+  const prices = await stripe.prices.list({
+    active: true,
+    type: "recurring",
+    limit: 100,
+    expand: ["data.product"]
+  });
+
+  const matches = prices.data.filter(price => {
+    const product = price.product;
+    const name = typeof product === "string" ? "" : String(product?.name || "");
+    return name.trim().toLowerCase() === productName.toLowerCase() &&
+      price.recurring?.interval === "month";
+  }).sort((a, b) => b.created - a.created);
+
+  const resolved = matches[0];
+  if (!resolved) {
+    throw new Error(
+      `No active monthly Stripe price was found for "${productName}" in the current Stripe mode. ` +
+      `Create that product/price in the same Test or Live mode as STRIPE_SECRET_KEY.`
+    );
+  }
+
+  stripePriceCache.set(plan, { id: resolved.id, expiresAt: now + 5 * 60 * 1000 });
+  console.log(`Resolved ${plan} price automatically to ${resolved.id} from ${productName}.`);
+  return resolved.id;
+}
+
 const VIDEO_MODEL = "wan-video/wan-2.2-5b-fast";
 const TTS_MODEL = process.env.TTS_MODEL || "inworld/realtime-tts-1.5-mini";
 const TTS_VOICE_ID = process.env.TTS_VOICE_ID || "Alex";
@@ -117,6 +182,11 @@ function planFromPrice(priceId) {
   if (priceId && priceId === priceIds.pro) return "pro";
   if (priceId && priceId === priceIds.creator) return "creator";
   return "free";
+}
+function planFromSubscription(sub) {
+  const metadataPlan = sub?.metadata?.plan;
+  if (metadataPlan === "creator" || metadataPlan === "pro") return metadataPlan;
+  return planFromPrice(sub?.items?.data?.[0]?.price?.id);
 }
 function planLimit(plan) {
   if (plan === "pro") return { period: "month", limit: PRO_VIDEOS_PER_MONTH };
@@ -428,7 +498,7 @@ app.post("/api/webhook", express.raw({ type: "application/json" }), async (req, 
         if (userId && session.subscription) {
           const sub = await stripe.subscriptions.retrieve(session.subscription);
           const priceId = sub.items.data[0]?.price?.id;
-          const resolvedPlan = planFromPrice(priceId);
+          const resolvedPlan = planFromSubscription(sub);
           if (resolvedPlan !== "free" || priceId === priceIds.creator || priceId === priceIds.pro) {
             await db.query("UPDATE users SET stripe_customer_id=$2,stripe_subscription_id=$3,stripe_price_id=$4,plan=CASE WHEN complimentary_pro THEN 'pro' ELSE $5 END,updated_at=NOW() WHERE id=$1", [userId, session.customer, sub.id, priceId || null, resolvedPlan]);
           }
@@ -439,7 +509,7 @@ app.post("/api/webhook", express.raw({ type: "application/json" }), async (req, 
         if (found.rows[0]) {
           const priceId = sub.items.data[0]?.price?.id;
           const active = ["active", "trialing", "past_due"].includes(sub.status);
-          const resolvedPlan = planFromPrice(priceId);
+          const resolvedPlan = planFromSubscription(sub);
           const finalPlan = active && resolvedPlan !== "free" ? resolvedPlan : "free";
           await db.query("UPDATE users SET stripe_subscription_id=$2,stripe_price_id=$3,plan=CASE WHEN complimentary_pro THEN 'pro' ELSE $4 END,updated_at=NOW() WHERE id=$1", [found.rows[0].id, sub.id, priceId || null, finalPlan]);
         }
@@ -453,7 +523,7 @@ app.post("/api/webhook", express.raw({ type: "application/json" }), async (req, 
           const found = await db.query("SELECT id FROM users WHERE stripe_customer_id=$1 OR stripe_subscription_id=$2 LIMIT 1", [invoice.customer, sub.id]);
           if (found.rows[0]) {
             const priceId = sub.items.data[0]?.price?.id;
-            const resolvedPlan = planFromPrice(priceId);
+            const resolvedPlan = planFromSubscription(sub);
             if (resolvedPlan !== "free") {
               await db.query("UPDATE users SET stripe_subscription_id=$2,stripe_price_id=$3,plan=CASE WHEN complimentary_pro THEN 'pro' ELSE $4 END,updated_at=NOW() WHERE id=$1", [found.rows[0].id, sub.id, priceId || null, resolvedPlan]);
             }
@@ -567,6 +637,8 @@ app.get("/api/stripe-status", async (req, res) => {
     livemode: process.env.STRIPE_SECRET_KEY ? process.env.STRIPE_SECRET_KEY.startsWith("sk_live_") : false,
     creatorPriceConfigured: typeof priceIds.creator === "string" && priceIds.creator.startsWith("price_"),
     proPriceConfigured: typeof priceIds.pro === "string" && priceIds.pro.startsWith("price_"),
+    creatorConfiguredValue: priceIds.creator ? "[set]" : "[missing]",
+    proConfiguredValue: priceIds.pro ? "[set]" : "[missing]",
     supportConfigured: !!openai,
     videoConfigured: !!replicate
   });
@@ -583,15 +655,12 @@ app.get("/subscribe/:plan", rateLimit("subscribe-redirect", {
   const user = await currentUser(req);
   if (!user) return res.redirect(`/account?next=${encodeURIComponent(plan)}`);
 
-  const price = priceIds[plan];
   if (!stripe) {
     return res.status(503).send("Stripe is not connected. Add STRIPE_SECRET_KEY in Render → Environment.");
   }
-  if (!price || !price.startsWith("price_")) {
-    return res.status(503).send(`The ${plan} Stripe Price ID is missing. Add the correct ${plan} price_ ID in Render → Environment.`);
-  }
 
   try {
+    const price = await resolveStripePriceId(plan);
     const base = `${req.protocol}://${req.get("host")}`;
     const session = await stripe.checkout.sessions.create({
       mode: "subscription",
@@ -609,31 +678,34 @@ app.get("/subscribe/:plan", rateLimit("subscribe-redirect", {
     return res.redirect(303, session.url);
   } catch (err) {
     console.error("GET checkout redirect error:", err);
-    const message = String(err?.message || "unknown Stripe error").slice(0, 300);
+    const message = String(err?.message || "unknown Stripe error").slice(0, 500);
     return res.status(502).send(`Stripe Checkout could not be opened: ${message}`);
   }
 });
 
 app.post("/api/create-checkout-session", sameOrigin, requireUser, rateLimit("checkout", { windowMs: 10 * 60 * 1000, max: 8, keyFn: req => req.user.id }), async (req, res) => {
   const plan = req.body?.plan;
-  const price = priceIds[plan];
-  if (!stripe) return res.status(503).json({ error: "Stripe is not connected. Add STRIPE_SECRET_KEY in Render → Environment." });
-  if (!price || !price.startsWith("price_")) return res.status(503).json({ error: `The ${plan} Stripe Price ID is missing or invalid.` });
   if (!['creator','pro'].includes(plan)) return res.status(400).json({ error: "Invalid plan." });
+  if (!stripe) return res.status(503).json({ error: "Stripe is not connected. Add STRIPE_SECRET_KEY in Render → Environment." });
   try {
+    const price = await resolveStripePriceId(plan);
     const base = `${req.protocol}://${req.get("host")}`;
     const session = await stripe.checkout.sessions.create({
       mode: "subscription",
       client_reference_id: req.user.id,
       customer_email: req.user.email,
       metadata: { userId: req.user.id, plan },
+      subscription_data: { metadata: { userId: req.user.id, plan } },
       line_items: [{ price, quantity: 1 }],
       success_url: `${base}/account?checkout=success`,
       cancel_url: `${base}/account?checkout=cancelled`,
       allow_promotion_codes: true
     }, { idempotencyKey: `checkout_${req.user.id}_${plan}_${Date.now()}_${crypto.randomBytes(4).toString("hex")}` });
     res.json({ url: session.url });
-  } catch (err) { console.error(err); res.status(500).json({ error: err.message || "Could not create Stripe Checkout session." }); }
+  } catch (err) {
+    console.error("POST checkout error:", err);
+    res.status(502).json({ error: String(err?.message || "Could not create Stripe Checkout session.").slice(0, 500) });
+  }
 });
 
 

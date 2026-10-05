@@ -12,7 +12,7 @@
 <div class="wrap">
   <div class="top"><a class="logo" href="/">Short<span>Spark</span></a><a class="back" href="/">← Back to ShortSpark</a></div>
   <div class="panel">
-    <div class="head"><h1>ShortSpark AI Support</h1><p>Ask about your plan, billing, prompts, video generation, or troubleshooting.</p></div>
+    <div class="head"><h1>ShortSpark AI Support</h1><p id="supportStatus">Connecting to ShortSpark AI…</p></div>
     <div id="supportMessages" class="messages"></div>
     <div class="compose"><textarea id="supportInput" maxlength="1200" placeholder="How can we help?"></textarea><button id="supportSend" class="send" type="button">Send</button></div>
     <div class="tiny">Never share passwords, API keys, Stripe secrets, or database credentials with support.</div>
@@ -31,6 +31,11 @@
     const bubble = document.createElement("div"); bubble.className = "support-bubble"; bubble.textContent = text;
     row.append(label,bubble); box.appendChild(row); box.scrollTop = box.scrollHeight;
   }
+  fetch("/api/stripe-status",{credentials:"include",cache:"no-store"}).then(r=>r.json()).then(d=>{
+      document.getElementById("supportStatus").textContent = d.supportConfigured
+        ? "AI support is online · plans, billing, prompts & troubleshooting"
+        : "Support fallback is online · add OPENAI_API_KEY to enable live AI";
+    }).catch(()=>{document.getElementById("supportStatus").textContent="AI support is ready."});
   add("assistant","Hi! I'm ShortSpark AI Support. What can I help you with?");
   async function go() {
     const text = input.value.trim(); if (!text || send.disabled) return;
