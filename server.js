@@ -259,15 +259,26 @@ async function downloadTo(url, file) {
   if (!response.ok) throw new Error(`Could not download generated video (${response.status}).`);
   await fs.writeFile(file, Buffer.from(await response.arrayBuffer()));
 }
-function buildScenes(idea, style, aspectRatio, sceneCount = 3) {
-  const pace = { "Fast & viral":"fast pacing, punchy visual changes, energetic camera motion", "Storytelling":"cinematic storytelling, clear visual progression, dramatic pacing", "Funny":"playful timing, comedic visual beats, expressive reactions", "Mysterious":"dark suspense, eerie lighting, slow reveals, rising tension", "Educational":"clean visual explanation, crisp compositions, surprising details" }[style] || "cinematic short-form storytelling";
-  const common = `Short-form ${aspectRatio} video, ${pace}. High visual quality, realistic motion, coherent subject continuity, no logos or watermarks. NO SPOKEN DIALOGUE and NO MUSIC; visuals only. Leave clean space for narration captions.`;
-  const prompts = [
-    `${common} Scene 1 — HOOK. Immediately visualize the central idea: ${idea}. Create a strong first-second visual surprise.`,
-    `${common} Scene 2 — ESCALATION. Continue the same story about ${idea}. Reveal a stronger detail, change the setting or camera angle, and build curiosity.`,
-    `${common} Scene 3 — PAYOFF. Deliver the strongest visual payoff connected to ${idea}. End with a memorable final shot that invites a part two.`
-  ];
-  return prompts.slice(0, sceneCount);
+function buildStoryPlan(idea, style) {
+  const pace = {
+    "Fast & viral": "fast pacing, punchy visual changes, energetic camera motion",
+    "Storytelling": "cinematic storytelling, clear visual progression, dramatic pacing",
+    "Funny": "playful timing, comedic visual beats, expressive reactions",
+    "Mysterious": "dark suspense, eerie lighting, slow reveals, rising tension",
+    "Educational": "clean visual explanation, crisp compositions, surprising details"
+  }[style] || "cinematic short-form storytelling";
+  return {
+    pace,
+    continuity: `Continuity bible: keep the SAME main subject, same appearance, same clothing, same props, same location, same time of day, same color language, and same cinematic style across every scene. Do not redesign the character or environment between scenes. Treat the previous clip's final frame as the exact starting state for the next clip.`,
+    beats: [
+      `HOOK: establish the main subject and situation immediately. Start with a visually clear action tied directly to: ${idea}. End the scene with the subject in a specific state that can continue naturally into the next shot.`,
+      `ESCALATION: begin from the exact state of Scene 1 and continue the same action. Advance the story with one concrete new development, keeping the same subject, wardrobe, props, location, and time continuity. End in a new state that can continue naturally into Scene 3.`,
+      `PAYOFF: begin from the exact state of Scene 2. Resolve the story with the strongest visual payoff related to ${idea}. Finish with a memorable final image and a natural stopping point.`
+    ]
+  };
+}
+function buildScenePrompt(plan, idea, style, aspectRatio, sceneNumber) {
+  return `Short-form ${aspectRatio} video. ${plan.pace}. High visual quality, realistic motion, coherent subject continuity, no logos or watermarks. NO SPOKEN DIALOGUE and NO MUSIC; visuals only. ${plan.continuity} Scene ${sceneNumber} of 3. ${plan.beats[sceneNumber-1]} The topic is: ${idea}. This is ${style} style. Avoid unrelated objects, unrelated locations, or visual resets. Avoid introducing new main characters unless absolutely required by the story. The final second should hold a stable frame so the next scene can continue from it.`;
 }
 
 // Stripe webhooks must be parsed as raw bytes before express.json().
@@ -424,13 +435,17 @@ app.get("/api/admin/overview", requireAdmin, async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: "Stripe dashboard data could not be loaded." }); }
 });
 
+async function extractLastFrame(videoPath, imagePath) {
+  await ffmpegRun(["-y", "-sseof", "-0.08", "-i", videoPath, "-frames:v", "1", "-q:v", "2", imagePath]);
+}
+
 async function generateJob(jobId, idea, style, aspectRatio, plan) {
   const job = jobs.get(jobId); if (!job) return;
   const isFree = plan === "free";
   const sceneCount = isFree ? 1 : 3;
   const clipDuration = 10;
   const totalDuration = isFree ? 10 : 30;
-  const providerResolution = "480p"; // current Seedance minimum supported target resolution
+  const providerResolution = "480p";
   const outputWidth = aspectRatio === "9:16" ? (isFree ? 360 : 480) : (isFree ? 640 : 854);
   const outputHeight = aspectRatio === "9:16" ? (isFree ? 640 : 854) : (isFree ? 360 : 480);
   try {
@@ -438,61 +453,86 @@ async function generateJob(jobId, idea, style, aspectRatio, plan) {
     if (db) await db.query("UPDATE video_generations SET status='generating' WHERE job_id=$1", [jobId]);
     job.status = "generating";
     job.progress = 5;
-    job.message = isFree ? "Creating your 10-second free preview…" : "Creating three 10-second scenes…";
-    const prompts = buildScenes(idea, style, aspectRatio, sceneCount), outputs = [];
-    for (let i = 0; i < prompts.length; i++) {
-      job.progress = 8 + Math.floor(i * (48 / Math.max(1, prompts.length - 1 || 1)));
-      job.message = isFree ? `Generating your free 10-second scene at 480p…` : `Generating scene ${i + 1} of 3 at 480p…`;
-      const output = await replicate.run(VIDEO_MODEL, { input: {
-        prompt: prompts[i], duration: clipDuration, resolution: providerResolution, aspect_ratio: aspectRatio,
-        fps: 24, camera_fixed: false, generate_audio: false
-      }});
-      outputs.push(outputUrl(output));
+    job.message = isFree ? "Creating your 10-second free preview…" : "Building a continuous 3-scene story…";
+
+    const storyPlan = buildStoryPlan(idea, style);
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "shortspark-"));
+    const clipPaths = [];
+    let continuationImage = null;
+
+    // Paid generations are sequential on purpose: the last frame of each clip is
+    // extracted and used as the starting image for the next clip. This makes the
+    // three 10-second scenes visually continue rather than being three unrelated
+    // generations with similar text prompts.
+    for (let i = 0; i < sceneCount; i++) {
+      const sceneNumber = i + 1;
+      job.progress = 8 + Math.floor(i * (46 / Math.max(1, sceneCount - 1 || 1)));
+      job.message = isFree
+        ? "Generating your free 10-second scene…"
+        : `Generating connected scene ${sceneNumber} of 3…`;
+
+      const input = {
+        prompt: buildScenePrompt(storyPlan, idea, style, aspectRatio, sceneNumber),
+        duration: clipDuration,
+        resolution: providerResolution,
+        aspect_ratio: aspectRatio,
+        fps: 24,
+        camera_fixed: false,
+        generate_audio: false
+      };
+      if (continuationImage) input.image = continuationImage;
+
+      const output = await replicate.run(VIDEO_MODEL, { input });
+      const videoUrl = outputUrl(output);
+      const clipPath = path.join(dir, `clip-${sceneNumber}.mp4`);
+      await downloadTo(videoUrl, clipPath);
+      clipPaths.push(clipPath);
+
+      if (!isFree && sceneNumber < sceneCount) {
+        const framePath = path.join(dir, `continuation-${sceneNumber}.png`);
+        await extractLastFrame(clipPath, framePath);
+        continuationImage = await fs.readFile(framePath);
+      }
     }
-    job.progress = 62; job.message = "Generating low-cost voice narration…";
+
+    job.progress = 62;
+    job.message = "Generating low-cost voice narration…";
     const narration = isFree
       ? `Here is the quick version about ${idea}. Watch what happens next.`
       : `Stop scrolling. You need to hear this about ${idea}. At first, it sounds impossible. But then one detail changes everything. And that's the part nobody sees coming. Would you have noticed it?`;
     const narrationUrl = await generateNarration(narration);
 
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "shortspark-")), clipPaths = [];
-    for (let i = 0; i < outputs.length; i++) {
-      const clip = path.join(dir, `clip-${i + 1}.mp4`);
-      job.progress = 66 + i * 5;
-      job.message = `Preparing scene ${i + 1}…`;
-      await downloadTo(outputs[i], clip); clipPaths.push(clip);
-    }
-    const audioPath = path.join(dir, "narration.mp3"); await downloadTo(narrationUrl, audioPath);
+    const audioPath = path.join(dir, "narration.mp3");
+    await downloadTo(narrationUrl, audioPath);
     const listPath = path.join(dir, "concat.txt");
-    const concatLines = clipPaths.map(p => `file '${p.replaceAll("'", "'\''")}'`).join("\n");
+    const concatLines = clipPaths.map(p => `file '${p.replaceAll("'", "'\\''")}'`).join("\n");
     await fs.writeFile(listPath, concatLines, "utf8");
     const finalPath = path.join(dir, "shortspark-short.mp4");
-    job.progress = 86; job.message = isFree ? "Finishing your 10-second free video…" : "Joining scenes and narration into your 30-second Short…";
+    job.progress = 86;
+    job.message = isFree ? "Finishing your 10-second free video…" : "Joining the connected scenes and narration…";
     const scaleFilter = `[0:v]scale=${outputWidth}:${outputHeight}:force_original_aspect_ratio=decrease,pad=${outputWidth}:${outputHeight}:(ow-iw)/2:(oh-ih)/2,format=yuv420p[v]`;
-    await ffmpegRun(["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-i", audioPath, "-filter_complex", scaleFilter, "-map", "[v]", "-map", "1:a", "-t", String(totalDuration), "-c:v", "libx264", "-preset", "veryfast", "-crf", isFree ? "29" : "26", "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", finalPath]);
+    await ffmpegRun([
+      "-y", "-f", "concat", "-safe", "0", "-i", listPath,
+      "-i", audioPath, "-filter_complex", scaleFilter,
+      "-map", "[v]", "-map", "1:a", "-t", String(totalDuration),
+      "-c:v", "libx264", "-preset", "veryfast", "-crf", isFree ? "29" : "26",
+      "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", finalPath
+    ]);
+
     const captionsPath = path.join(dir, "captions.srt");
     const captions = isFree
-      ? `1
-00:00:00,000 --> 00:00:10,000
-Here is the quick version about ${idea}. Watch what happens next.
-`
-      : `1
-00:00:00,000 --> 00:00:07,000
-Stop scrolling. You need to hear this about ${idea}.
-
-2
-00:00:07,000 --> 00:00:18,000
-At first, it sounds impossible. But then one detail changes everything.
-
-3
-00:00:18,000 --> 00:00:30,000
-And that's the part nobody sees coming. Would you have noticed it?
-`;
+      ? `1\n00:00:00,000 --> 00:00:10,000\nHere is the quick version about ${idea}. Watch what happens next.\n`
+      : `1\n00:00:00,000 --> 00:00:07,000\nStop scrolling. You need to hear this about ${idea}.\n\n2\n00:00:07,000 --> 00:00:18,000\nAt first, it sounds impossible. But then one detail changes everything.\n\n3\n00:00:18,000 --> 00:00:30,000\nAnd that's the part nobody sees coming. Would you have noticed it?\n`;
     await fs.writeFile(captionsPath, captions, "utf8");
-    Object.assign(job, { dir, finalPath, captionsPath, progress: 100, message: isFree ? "Your 10-second free Short is ready." : "Your 30-second Short is ready.", status: "completed", durationSeconds: totalDuration, outputWidth, outputHeight, plan });
+    Object.assign(job, {
+      dir, finalPath, captionsPath, progress: 100,
+      message: isFree ? "Your 10-second free Short is ready." : "Your connected 30-second Short is ready.",
+      durationSeconds: totalDuration, outputWidth, outputHeight, plan
+    });
     if (db) await db.query("UPDATE video_generations SET status='completed', completed_at=NOW() WHERE job_id=$1", [jobId]);
   } catch (error) {
-    console.error(`Video job ${jobId} failed`, error); Object.assign(job, { status: "failed", progress: 0, error: error.message || "Video generation failed." });
+    console.error(`Video job ${jobId} failed`, error);
+    Object.assign(job, { status: "failed", progress: 0, error: error.message || "Video generation failed." });
     if (db) await db.query("UPDATE video_generations SET status='failed', error=$2 WHERE job_id=$1", [jobId, job.error]);
   }
 }

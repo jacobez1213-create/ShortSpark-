@@ -16,3 +16,9 @@ Use:
 - Root directory: blank
 
 Required Render variables include the existing Stripe/Replicate variables plus `DATABASE_URL`.
+
+## Scene continuity update
+
+Paid 30-second videos are generated sequentially. Scene 2 starts from a still frame extracted from the end of Scene 1, and Scene 3 starts from a still frame extracted from the end of Scene 2. The prompts also include a shared continuity bible and explicit scene beats so the three clips tell one continuous story rather than three unrelated shots.
+
+The current Seedance 1.5 Pro API supports an `image` input for image-to-video generation, and the documented schema also supports `last_frame_image`. This build uses the simpler chained `image` approach for continuation between clips. See: https://replicate.com/bytedance/seedance-1.5-pro/api/schema
