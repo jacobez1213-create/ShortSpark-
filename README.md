@@ -33,3 +33,11 @@ This build includes a safer owner-only Pro entitlement. Set `OWNER_EMAIL` and `O
 - Free: 1 video/day; 10 seconds; 360p delivery
 - Creator: $8.99/month; 10 videos/month; 30 seconds; 480p
 - Pro: $15.99/month; 24 videos/month; 30 seconds; 480p
+
+
+## Paid duration selector (v1.8)
+- Free users are forced server-side to 10 seconds.
+- Creator and Pro can choose whole-second durations from 5 through 30 seconds.
+- The server rejects paid duration requests outside 5–30 seconds and ignores client attempts to give free users longer durations.
+- To stay compatible with Seedance 1.5 Pro's 2–12 second per-clip limit, totals use the minimum number of connected clips: 5–12s = 1 clip, 13–24s = 2 clips, 25–30s = 3 clips. A 30s request remains 10/10/10.
+- Paid scenes are generated sequentially and each later scene starts from the prior scene's extracted last frame, preserving continuity.
