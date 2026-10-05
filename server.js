@@ -9,8 +9,11 @@ import { fileURLToPath } from "node:url";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import { spawn } from "node:child_process";
+import helmet from "helmet";
 
 const app = express();
+app.disable("x-powered-by");
+app.set("trust proxy", 1);
 const PORT = process.env.PORT || 4242;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -21,12 +24,42 @@ const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SEC
 const replicate = process.env.REPLICATE_API_TOKEN ? new Replicate({ auth: process.env.REPLICATE_API_TOKEN }) : null;
 const priceIds = { creator: process.env.STRIPE_PRICE_CREATOR, pro: process.env.STRIPE_PRICE_PRO };
 const VIDEO_MODEL = process.env.VIDEO_MODEL || "bytedance/seedance-1.5-pro";
+const TTS_MODEL = process.env.TTS_MODEL || "inworld/realtime-tts-1.5-mini";
 const FREE_VIDEOS_PER_DAY = Math.max(1, Number(process.env.FREE_VIDEOS_PER_DAY || 1));
-const CREATOR_VIDEOS_PER_MONTH = Math.max(1, Number(process.env.CREATOR_VIDEOS_PER_MONTH || 15));
-const PRO_VIDEOS_PER_MONTH = Math.max(1, Number(process.env.PRO_VIDEOS_PER_MONTH || 30));
+const CREATOR_VIDEOS_PER_MONTH = Math.max(1, Number(process.env.CREATOR_VIDEOS_PER_MONTH || 10));
+const PRO_VIDEOS_PER_MONTH = Math.max(1, Number(process.env.PRO_VIDEOS_PER_MONTH || 24));
 
 const db = process.env.DATABASE_URL ? new Pool({ connectionString: process.env.DATABASE_URL, max: 5 }) : null;
 const jobs = new Map();
+
+const STYLE_OPTIONS = new Set(["Fast & viral", "Storytelling", "Funny", "Mysterious", "Educational"]);
+const rateBuckets = new Map();
+function requesterKey(req) {
+  return hashValue(req.ip || req.socket.remoteAddress || "unknown");
+}
+function rateLimit(name, { windowMs, max, keyFn = requesterKey }) {
+  return (req, res, next) => {
+    const key = `${name}:${keyFn(req)}`;
+    const now = Date.now();
+    let bucket = rateBuckets.get(key);
+    if (!bucket || now >= bucket.resetAt) bucket = { count: 0, resetAt: now + windowMs };
+    bucket.count += 1;
+    rateBuckets.set(key, bucket);
+    if (bucket.count > max) {
+      res.setHeader("Retry-After", String(Math.ceil((bucket.resetAt - now) / 1000)));
+      return res.status(429).json({ error: "Too many requests. Please try again shortly." });
+    }
+    next();
+  };
+}
+function sameOrigin(req, res, next) {
+  const origin = req.get("origin");
+  if (!origin) return res.status(403).json({ error: "Request origin could not be verified." });
+  const configured = String(process.env.PUBLIC_ORIGIN || "").replace(/\/+$/, "");
+  const expected = configured || `${req.protocol}://${req.get("host")}`;
+  if (origin !== expected) return res.status(403).json({ error: "Request origin could not be verified." });
+  next();
+}
 
 function sign(value) { return crypto.createHmac("sha256", COOKIE_SECRET).update(value).digest("hex"); }
 function makeToken() { return crypto.randomBytes(32).toString("hex"); }
@@ -89,8 +122,9 @@ async function verifyPassword(password, encoded) {
     return false;
   }
   const derived = await pbkdf2Async(password, salt);
-  return derived.length === stored.length &&
-    crypto.timingSafeEqual(Buffer.from(derived), Buffer.from(stored));
+  const expected = Buffer.from(stored, "hex");
+  const actual = Buffer.from(derived, "hex");
+  return expected.length === actual.length && crypto.timingSafeEqual(actual, expected);
 }
 
 async function createUserSession(res, userId) {
@@ -198,6 +232,19 @@ function outputUrl(output) {
   if (output && typeof output.url === "string") return output.url;
   throw new Error("The video provider returned an unexpected output.");
 }
+async function generateNarration(text) {
+  if (!replicate) throw new Error("Replicate is not configured.");
+  const out = await replicate.run(TTS_MODEL, { input: {
+    text,
+    language: "en",
+    voice_id: process.env.TTS_VOICE_ID || "Ashley",
+    sample_rate: 48000,
+    audio_format: "mp3",
+    speaking_rate: 0
+  }});
+  return outputUrl(out);
+}
+
 function ffmpegRun(args) {
   return new Promise((resolve, reject) => {
     const proc = spawn(ffmpegPath, args, { stdio: ["ignore", "pipe", "pipe"] });
@@ -214,17 +261,18 @@ async function downloadTo(url, file) {
 }
 function buildScenes(idea, style, aspectRatio) {
   const pace = { "Fast & viral":"fast pacing, punchy visual changes, energetic camera motion", "Storytelling":"cinematic storytelling, clear visual progression, dramatic pacing", "Funny":"playful timing, comedic visual beats, expressive reactions", "Mysterious":"dark suspense, eerie lighting, slow reveals, rising tension", "Educational":"clean visual explanation, crisp compositions, surprising details" }[style] || "cinematic short-form storytelling";
-  const common = `Short-form ${aspectRatio} video, ${pace}. High visual quality, realistic motion, coherent subject continuity, no logos or watermarks.`;
+  const common = `Short-form ${aspectRatio} video, ${pace}. High visual quality, realistic motion, coherent subject continuity, no logos or watermarks. NO SPOKEN DIALOGUE and NO MUSIC; visuals only. Leave clean space for narration captions.`;
   return [
-    `${common} Scene 1 — HOOK. Immediately visualize the central idea: ${idea}. Create a strong first-second visual surprise. Spoken narration in natural American English: "Stop scrolling. You need to hear this about ${idea}." Add fitting music and sound effects.`,
-    `${common} Scene 2 — ESCALATION. Continue the same story about ${idea}. Reveal a stronger detail, change the setting or camera angle, and build curiosity. Spoken narration in natural American English: "At first, it sounds impossible. But then one detail changes everything." Add synchronized sound design.`,
-    `${common} Scene 3 — PAYOFF. Deliver the strongest visual payoff connected to ${idea}. End with a memorable final shot. Spoken narration in natural American English: "And that's the part nobody sees coming. Would you have noticed it?" Add a final musical hit and sound design.`
+    `${common} Scene 1 — HOOK. Immediately visualize the central idea: ${idea}. Create a strong first-second visual surprise.`,
+    `${common} Scene 2 — ESCALATION. Continue the same story about ${idea}. Reveal a stronger detail, change the setting or camera angle, and build curiosity.`,
+    `${common} Scene 3 — PAYOFF. Deliver the strongest visual payoff connected to ${idea}. End with a memorable final shot that invites a part two.`
   ];
 }
 
 // Stripe webhooks must be parsed as raw bytes before express.json().
 app.post("/api/webhook", express.raw({ type: "application/json" }), async (req, res) => {
   if (!stripe) return res.json({ received: true, demo: true });
+  if (!process.env.STRIPE_WEBHOOK_SECRET) return res.status(503).json({ error: "Webhook signing secret is not configured." });
   try {
     const event = stripe.webhooks.constructEvent(req.body, req.headers["stripe-signature"], process.env.STRIPE_WEBHOOK_SECRET);
     if (db) {
@@ -234,7 +282,10 @@ app.post("/api/webhook", express.raw({ type: "application/json" }), async (req, 
         if (userId && session.subscription) {
           const sub = await stripe.subscriptions.retrieve(session.subscription);
           const priceId = sub.items.data[0]?.price?.id;
-          await db.query("UPDATE users SET stripe_customer_id=$2,stripe_subscription_id=$3,stripe_price_id=$4,plan=$5,updated_at=NOW() WHERE id=$1", [userId, session.customer, sub.id, priceId || null, planFromPrice(priceId)]);
+          const resolvedPlan = planFromPrice(priceId);
+          if (resolvedPlan !== "free" || priceId === priceIds.creator || priceId === priceIds.pro) {
+            await db.query("UPDATE users SET stripe_customer_id=$2,stripe_subscription_id=$3,stripe_price_id=$4,plan=$5,updated_at=NOW() WHERE id=$1", [userId, session.customer, sub.id, priceId || null, resolvedPlan]);
+          }
         }
       } else if (event.type === "customer.subscription.updated") {
         const sub = event.data.object;
@@ -242,7 +293,9 @@ app.post("/api/webhook", express.raw({ type: "application/json" }), async (req, 
         if (found.rows[0]) {
           const priceId = sub.items.data[0]?.price?.id;
           const active = ["active", "trialing", "past_due"].includes(sub.status);
-          await db.query("UPDATE users SET stripe_subscription_id=$2,stripe_price_id=$3,plan=$4,updated_at=NOW() WHERE id=$1", [found.rows[0].id, sub.id, priceId || null, active ? planFromPrice(priceId) : "free"]);
+          const resolvedPlan = planFromPrice(priceId);
+          const finalPlan = active && resolvedPlan !== "free" ? resolvedPlan : "free";
+          await db.query("UPDATE users SET stripe_subscription_id=$2,stripe_price_id=$3,plan=$4,updated_at=NOW() WHERE id=$1", [found.rows[0].id, sub.id, priceId || null, finalPlan]);
         }
       } else if (event.type === "customer.subscription.deleted") {
         const sub = event.data.object;
@@ -254,7 +307,10 @@ app.post("/api/webhook", express.raw({ type: "application/json" }), async (req, 
           const found = await db.query("SELECT id FROM users WHERE stripe_customer_id=$1 OR stripe_subscription_id=$2 LIMIT 1", [invoice.customer, sub.id]);
           if (found.rows[0]) {
             const priceId = sub.items.data[0]?.price?.id;
-            await db.query("UPDATE users SET stripe_subscription_id=$2,stripe_price_id=$3,plan=$4,updated_at=NOW() WHERE id=$1", [found.rows[0].id, sub.id, priceId || null, planFromPrice(priceId)]);
+            const resolvedPlan = planFromPrice(priceId);
+            if (resolvedPlan !== "free") {
+              await db.query("UPDATE users SET stripe_subscription_id=$2,stripe_price_id=$3,plan=$4,updated_at=NOW() WHERE id=$1", [found.rows[0].id, sub.id, priceId || null, resolvedPlan]);
+            }
           }
         }
       }
@@ -266,15 +322,17 @@ app.post("/api/webhook", express.raw({ type: "application/json" }), async (req, 
   }
 });
 
-app.use(express.json());
-app.use(express.static(__dirname));
+app.use(helmet({ contentSecurityPolicy: false }));
+app.use(express.json({ limit: "32kb" }));
+app.use(express.static(path.join(__dirname, "public"), { dotfiles: "deny", index: false }));
 
-app.post("/api/auth/signup", async (req, res) => {
+app.post("/api/auth/signup", sameOrigin, rateLimit("signup", { windowMs: 15 * 60 * 1000, max: 5 }), async (req, res) => {
   try {
     requireDb();
     const email = normalizeEmail(req.body?.email), password = String(req.body?.password || "");
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ error: "Enter a valid email address." });
     if (password.length < 8) return res.status(400).json({ error: "Password must be at least 8 characters." });
+    if (password.length > 128) return res.status(400).json({ error: "Password is too long." });
     const id = crypto.randomUUID();
     const passwordHash = await hashPassword(password);
     try { await db.query("INSERT INTO users(id,email,password_hash) VALUES($1,$2,$3)", [id, email, passwordHash]); }
@@ -283,7 +341,7 @@ app.post("/api/auth/signup", async (req, res) => {
     res.status(201).json({ user: { id, email, plan: "free" } });
   } catch (err) { console.error(err); res.status(500).json({ error: "Could not create account." }); }
 });
-app.post("/api/auth/login", async (req, res) => {
+app.post("/api/auth/login", sameOrigin, rateLimit("login", { windowMs: 15 * 60 * 1000, max: 10 }), async (req, res) => {
   try {
     requireDb();
     const email = normalizeEmail(req.body?.email), password = String(req.body?.password || "");
@@ -294,7 +352,7 @@ app.post("/api/auth/login", async (req, res) => {
     res.json({ user: publicUser(user) });
   } catch (err) { console.error(err); res.status(500).json({ error: "Could not sign in." }); }
 });
-app.post("/api/auth/logout", async (req, res) => {
+app.post("/api/auth/logout", sameOrigin, rateLimit("logout", { windowMs: 5 * 60 * 1000, max: 20 }), async (req, res) => {
   if (db) {
     const raw = req.headers.cookie?.split(";").map(x => x.trim()).find(x => x.startsWith("ss_session="));
     if (raw) await db.query("DELETE FROM sessions WHERE token_hash=$1", [hashValue(decodeURIComponent(raw.slice("ss_session=".length)))]);
@@ -321,7 +379,7 @@ app.get("/api/health", async (req, res) => {
   }
 });
 
-app.post("/api/create-checkout-session", requireUser, async (req, res) => {
+app.post("/api/create-checkout-session", sameOrigin, requireUser, rateLimit("checkout", { windowMs: 10 * 60 * 1000, max: 8, keyFn: req => req.user.id }), async (req, res) => {
   const plan = req.body?.plan;
   const price = priceIds[plan];
   if (!stripe || !price) return res.status(503).json({ error: "Stripe is not configured. Check Render environment variables." });
@@ -337,18 +395,18 @@ app.post("/api/create-checkout-session", requireUser, async (req, res) => {
       success_url: `${base}/account?checkout=success`,
       cancel_url: `${base}/account?checkout=cancelled`,
       allow_promotion_codes: true
-    });
+    }, { idempotencyKey: `checkout_${req.user.id}_${crypto.randomUUID()}` });
     res.json({ url: session.url });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message || "Could not create Stripe Checkout session." }); }
 });
 
-app.post("/api/admin/login", (req, res) => {
+app.post("/api/admin/login", sameOrigin, rateLimit("admin-login", { windowMs: 15 * 60 * 1000, max: 5 }), (req, res) => {
   if (req.body?.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "Incorrect password." });
   const token = crypto.randomBytes(24).toString("hex");
   res.setHeader("Set-Cookie", `ss_admin=${encodeURIComponent(`${token}.${sign(token)}`)}; ${cookieOptions(8 * 60 * 60)}`);
   res.json({ ok: true });
 });
-app.post("/api/admin/logout", (req, res) => { res.setHeader("Set-Cookie", `ss_admin=; ${cookieOptions(0)}`); res.json({ ok: true }); });
+app.post("/api/admin/logout", sameOrigin, requireAdmin, rateLimit("admin-logout", { windowMs: 5 * 60 * 1000, max: 10 }), (req, res) => { res.setHeader("Set-Cookie", `ss_admin=; ${cookieOptions(0)}`); res.json({ ok: true }); });
 app.get("/api/admin/overview", requireAdmin, async (req, res) => {
   if (!stripe) return res.json({ demo: true, available: 0, pending: 0, revenue: 0, paymentCount: 0, activeSubscriptions: 0, payments: [], payouts: [] });
   try {
@@ -370,23 +428,31 @@ async function generateJob(jobId, idea, style, aspectRatio) {
   try {
     if (!replicate) throw new Error("AI video is not configured. Add REPLICATE_API_TOKEN to Render Environment Variables.");
     if (db) await db.query("UPDATE video_generations SET status='generating' WHERE job_id=$1", [jobId]);
-    job.status = "generating"; job.progress = 8; job.message = "Starting three AI video scenes…";
+    job.status = "generating"; job.progress = 5; job.message = "Creating three low-cost 480p scenes…";
     const prompts = buildScenes(idea, style, aspectRatio), outputs = [];
     for (let i = 0; i < prompts.length; i++) {
-      job.progress = 10 + i * 18; job.message = `Generating scene ${i + 1} of 3…`;
-      const output = await replicate.run(VIDEO_MODEL, { input: { prompt: prompts[i], duration: 10, resolution: "720p", aspect_ratio: aspectRatio, fps: 24, camera_fixed: false, generate_audio: true } });
+      job.progress = 8 + i * 18; job.message = `Generating scene ${i + 1} of 3 at 480p…`;
+      const output = await replicate.run(VIDEO_MODEL, { input: {
+        prompt: prompts[i], duration: 10, resolution: "480p", aspect_ratio: aspectRatio,
+        fps: 24, camera_fixed: false, generate_audio: false
+      }});
       outputs.push(outputUrl(output));
     }
+    job.progress = 62; job.message = "Generating low-cost voice narration…";
+    const narration = `Stop scrolling. You need to hear this about ${idea}. At first, it sounds impossible. But then one detail changes everything. And that's the part nobody sees coming. Would you have noticed it?`;
+    const narrationUrl = await generateNarration(narration);
+
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "shortspark-")), clipPaths = [];
     for (let i = 0; i < outputs.length; i++) {
-      const clip = path.join(dir, `clip-${i + 1}.mp4`); job.progress = 66 + i * 5; job.message = `Preparing scene ${i + 1}…`; await downloadTo(outputs[i], clip); clipPaths.push(clip);
+      const clip = path.join(dir, `clip-${i + 1}.mp4`); job.progress = 66 + i * 4; job.message = `Preparing scene ${i + 1}…`; await downloadTo(outputs[i], clip); clipPaths.push(clip);
     }
+    const audioPath = path.join(dir, "narration.mp3"); await downloadTo(narrationUrl, audioPath);
     const listPath = path.join(dir, "concat.txt");
-    await fs.writeFile(listPath, clipPaths.map(p => `file '${p.replaceAll("'", "'\\''")}'`).join("\n"), "utf8");
-    const finalPath = path.join(dir, "shortspark-short.mp4"); job.progress = 87; job.message = "Joining the scenes into one Short…";
-    await ffmpegRun(["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", finalPath]);
+    await fs.writeFile(listPath, clipPaths.map(p => `file '${p.replaceAll("'", "'\''")}'`).join("\n"), "utf8");
+    const finalPath = path.join(dir, "shortspark-short.mp4"); job.progress = 86; job.message = "Joining scenes and narration into one Short…";
+    await ffmpegRun(["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-i", audioPath, "-filter_complex", "[0:v]scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2,format=yuv420p[v]", "-map", "[v]", "-map", "1:a", "-t", "30", "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", finalPath]);
     const captionsPath = path.join(dir, "captions.srt");
-    await fs.writeFile(captionsPath, `1\n00:00:00,000 --> 00:00:10,000\nStop scrolling. You need to hear this about ${idea}.\n\n2\n00:00:10,000 --> 00:00:20,000\nAt first, it sounds impossible. But then one detail changes everything.\n\n3\n00:00:20,000 --> 00:00:30,000\nAnd that's the part nobody sees coming. Would you have noticed it?\n`, "utf8");
+    await fs.writeFile(captionsPath, `1\n00:00:00,000 --> 00:00:07,000\nStop scrolling. You need to hear this about ${idea}.\n\n2\n00:00:07,000 --> 00:00:18,000\nAt first, it sounds impossible. But then one detail changes everything.\n\n3\n00:00:18,000 --> 00:00:30,000\nAnd that's the part nobody sees coming. Would you have noticed it?\n`, "utf8");
     Object.assign(job, { dir, finalPath, captionsPath, progress: 100, message: "Your 30-second Short is ready.", status: "completed" });
     if (db) await db.query("UPDATE video_generations SET status='completed', completed_at=NOW() WHERE job_id=$1", [jobId]);
   } catch (error) {
@@ -394,8 +460,10 @@ async function generateJob(jobId, idea, style, aspectRatio) {
     if (db) await db.query("UPDATE video_generations SET status='failed', error=$2 WHERE job_id=$1", [jobId, job.error]);
   }
 }
-app.post("/api/generate-video", requireUser, async (req, res) => {
-  const idea = cleanIdea(req.body?.idea), style = String(req.body?.style || "Fast & viral"), aspectRatio = req.body?.aspectRatio === "16:9" ? "16:9" : "9:16";
+app.post("/api/generate-video", sameOrigin, requireUser, rateLimit("video", { windowMs: 10 * 60 * 1000, max: 6, keyFn: req => req.user.id }), async (req, res) => {
+  const idea = cleanIdea(req.body?.idea);
+  const style = STYLE_OPTIONS.has(req.body?.style) ? req.body.style : "Fast & viral";
+  const aspectRatio = req.body?.aspectRatio === "16:9" ? "16:9" : "9:16";
   if (!idea) return res.status(400).json({ error: "Enter an idea first." });
   if (!replicate) return res.status(503).json({ error: "AI video is not configured yet. Add REPLICATE_API_TOKEN to Render." });
   if (!db) return res.status(503).json({ error: "Accounts are not configured yet. Add DATABASE_URL to Render." });
@@ -419,12 +487,14 @@ app.get("/api/generated-captions/:id", requireUser, (req, res) => { const job = 
 
 setInterval(async () => {
   const cutoff = Date.now() - 60 * 60 * 1000;
+  const now = Date.now();
+  for (const [key, bucket] of rateBuckets) if (bucket.resetAt <= now) rateBuckets.delete(key);
   for (const [id, job] of jobs) if (job.createdAt < cutoff) { if (job.dir) { try { await fs.rm(job.dir, { recursive: true, force: true }); } catch {} } jobs.delete(id); }
   if (db) { try { await db.query("DELETE FROM sessions WHERE expires_at<NOW()") } catch {} }
 }, 10 * 60 * 1000).unref();
 
-app.get("/admin", (req, res) => res.sendFile(path.join(__dirname, "admin.html")));
-app.get("/account", (req, res) => res.sendFile(path.join(__dirname, "account.html")));
-app.get("/{*splat}", (req, res) => res.sendFile(path.join(__dirname, "index.html")));
+app.get("/admin", (req, res) => res.sendFile(path.join(__dirname, "public", "admin.html")));
+app.get("/account", (req, res) => res.sendFile(path.join(__dirname, "public", "account.html")));
+app.get("/{*splat}", (req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 
 initDb().then(() => app.listen(PORT, "0.0.0.0", () => console.log(`ShortSpark running on port ${PORT}`))).catch(err => { console.error("Database initialization failed", err); process.exit(1); });

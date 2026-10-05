@@ -9,8 +9,8 @@ This build adds real user accounts backed by Postgres, persistent usage limits, 
 - Stripe Checkout requires a signed-in user and ties the subscription to that account.
 - Stripe subscription webhooks update the user's plan automatically.
 - Account page shows plan and remaining usage.
-- Creator default: 15 videos/month.
-- Pro default: 30 videos/month.
+- Creator default: 10 videos/month.
+- Pro default: 24 videos/month.
 - Limits can be changed with environment variables.
 
 ## Database
@@ -52,3 +52,39 @@ This build also fixes account creation on small Render instances by adjusting th
 
 ## Signup error fix
 The account-password hashing implementation now uses Node PBKDF2-SHA256 instead of memory-heavy scrypt, which avoids `ERR_CRYPTO_INVALID_SCRYPT_PARAMS` on small/free Render instances.
+
+
+## Budget mode
+This build uses Seedance 1.5 Pro at 480p without model-generated audio, then adds separate narration. Current listed Seedance cost is $0.013/s without audio at 480p. The TTS model defaults to Inworld realtime-tts-1.5-mini, currently listed at $0.015 per 1,000 input characters. Together, typical 30-second narration should leave meaningful margin under a $0.50 raw AI-usage target, but actual spend can vary with retries and output length.
+
+
+## Current business plans
+- Free: 1 video per day
+- Creator: $8.99/month, 10 videos/month
+- Pro: $15.99/month, 24 videos/month
+
+The website text and server defaults now match those limits. Because Stripe Price objects are separate resources, create new $8.99 and $15.99 monthly Prices (test mode first), then update `STRIPE_PRICE_CREATOR` and `STRIPE_PRICE_PRO` in Render to the new `price_...` IDs. Stripe documents creating recurring Prices for a Product and using the Price ID in Checkout. 
+
+## Security hardening in v1.3
+- Helmet security headers (CSP remains disabled because the current pages contain inline scripts; moving scripts to external files is a future CSP hardening step).
+- Server-side Postgres usage enforcement with transactional row locking/advisory locking.
+- Server-side authentication for video generation, account usage, and Stripe checkout.
+- HttpOnly + SameSite session cookies with `Secure` in production.
+- Hashed session tokens in Postgres.
+- PBKDF2-SHA256 password hashing with timing-safe verification.
+- Request body size limit.
+- Same-origin checks on state-changing browser requests.
+- Rate limits on signup, login, checkout, admin login, logout, and video generation.
+- Stripe webhook signature verification.
+- Generated videos and caption files require the authenticated owner session.
+- Stripe checkout uses an idempotency key.
+- Admin and secret credentials remain server-side in Render environment variables.
+
+## Important production note
+This is a strong MVP foundation, not a formal security certification. Before a larger launch, add email verification, password reset, a durable job queue, object storage for generated videos, centralized rate limiting if you scale to multiple instances, stronger admin identity/authentication, monitoring/alerting, and a CSP after moving inline scripts into external assets.
+
+
+## Final v1.3 file layout
+Only browser-facing files live under `public/`. The Node server, package manifest, README, and environment template are outside the public directory so Express static hosting does not expose your server source or deployment files.
+
+Upload the contents of this package to the root of your GitHub `shortspark` repository. Keep the existing Render Root Directory blank and Start Command `npm start`.
