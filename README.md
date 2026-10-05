@@ -1,56 +1,45 @@
-# ShortSpark business site + developer dashboard
+# ShortSpark v1.2 — Accounts + persistent usage tracking
 
-This package turns the earlier landing page into a small SaaS starter with a private developer dashboard and Stripe payment/payout plumbing.
+This build adds real user accounts backed by Postgres, persistent usage limits, and Stripe subscription-to-account linking.
 
-## Included
+## What it fixes
+- A free user gets 1 AI video generation per UTC day.
+- Usage is recorded in Postgres before generation starts, so clearing cookies won't reset the limit.
+- Users sign up/login with email + password.
+- Stripe Checkout requires a signed-in user and ties the subscription to that account.
+- Stripe subscription webhooks update the user's plan automatically.
+- Account page shows plan and remaining usage.
+- Creator default: 15 videos/month.
+- Pro default: 30 videos/month.
+- Limits can be changed with environment variables.
 
-- Public ShortSpark landing page and Short generator
-- Creator ($9.99/mo) and Pro ($19.99/mo) checkout buttons
-- Private `/admin` developer dashboard
-- Available and pending Stripe balance
-- 30-day paid revenue
-- Active subscription count
-- Recent payments
-- Recent payouts
-- Admin-triggered manual payout endpoint
-- Stripe webhook endpoint
-- Demo dashboard when Stripe keys are not configured
+## Database
+Use Neon Postgres for the persistent database. As of Oct. 2, 2026, Neon advertises 1 GB of Postgres storage per Free project. For a real production business, monitor usage and upgrade when needed.
 
-## Important security note
+Create a Neon project, copy the pooled connection string, and add it to Render as:
 
-The Stripe secret key is server-side only. Do not put it into `index.html`, `admin.html`, GitHub, or client-side JavaScript.
+DATABASE_URL=postgres://...?...sslmode=require
 
-The included admin login is a lightweight starter authentication layer. For a real public SaaS, put this behind a stronger auth system (for example an established identity provider), use HTTPS, rotate secrets, and store application data in a database.
+The app automatically creates its tables when it starts.
 
-## Connect real payments
+## Render settings
+Keep:
+- Runtime: Node
+- Build command: npm install
+- Start command: npm start
+- Root directory: blank
 
-1. Create a Stripe account and activate your business/payout details.
-2. In Stripe, create two recurring Prices matching $9.99/month and $19.99/month.
-3. Copy the two price IDs into `.env`.
-4. Copy your Stripe secret key into `STRIPE_SECRET_KEY`.
-5. Create a webhook endpoint pointing at `/api/webhook` and copy its signing secret into `STRIPE_WEBHOOK_SECRET`.
-6. Set a strong `ADMIN_PASSWORD` and `COOKIE_SECRET`.
-7. Run:
+Add DATABASE_URL to the existing Render Environment Variables. Keep your Stripe and Replicate secrets there too. Never upload .env to GitHub.
 
-   npm install
-   npm start
+## AI video
+Keep REPLICATE_API_TOKEN in Render. The current AI video generator uses Seedance 1.5 Pro via Replicate and combines three 10-second clips with ffmpeg.
 
-8. Open `http://localhost:4242` for the public site and `http://localhost:4242/admin` for the developer dashboard.
+## Security status
+Passwords are hashed with Node scrypt. Session tokens are stored hashed in Postgres and sent as HttpOnly/SameSite cookies. Stripe and Replicate credentials stay server-side.
 
-Use Stripe test mode first. Test-mode payments/payouts do not move real money.
+For a broad public launch, add email verification, password reset, CSRF/origin protections, durable video object storage, job queues, and stronger admin authentication.
 
-## Receiving money
-
-Customer subscription payments land in your Stripe balance. You connect your bank account/debit card in Stripe and use Stripe's payout schedule or the manual payout function included here. The dashboard's payout button calls Stripe's payout API using the server-side secret key.
-
-## Production
-
-Deploy the Node server to a HTTPS Node-compatible host and set the environment variables there. Point your Stripe webhook at the deployed HTTPS URL. Set the public site URL in any additional success/cancel or custom-domain configuration you add.
-
-## Data
-
-For a production SaaS, add a database and persist customer/user/subscription records from webhook events. The current dashboard reads live Stripe objects directly so it is useful as a starter, but it is intentionally not a full accounting system.
-
-## Stripe sources
-
-Stripe Checkout sessions can be created on the server for subscriptions; successful sessions reference the customer/subscription. Stripe payouts send funds from your Stripe balance to your default external account, and test-mode payouts do not move real funds.
+## Sources
+Neon Free plan (Oct. 2, 2026): https://neon.com/blog/neon-free-plan-1-gb-per-project
+Neon Postgres connection strings: https://neon.com/blog/authenticating-users-in-astro-using-neon-postgres-and-lucia-auth
+Render free services and ephemeral storage: https://render.com/docs/free
