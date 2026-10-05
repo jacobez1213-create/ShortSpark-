@@ -28,6 +28,8 @@ const TTS_MODEL = process.env.TTS_MODEL || "inworld/realtime-tts-1.5-mini";
 const FREE_VIDEOS_PER_DAY = Math.max(1, Number(process.env.FREE_VIDEOS_PER_DAY || 1));
 const CREATOR_VIDEOS_PER_MONTH = Math.max(1, Number(process.env.CREATOR_VIDEOS_PER_MONTH || 10));
 const PRO_VIDEOS_PER_MONTH = Math.max(1, Number(process.env.PRO_VIDEOS_PER_MONTH || 24));
+const OWNER_EMAIL = normalizeEmail(process.env.OWNER_EMAIL || "");
+const OWNER_ACCESS_CODE = String(process.env.OWNER_ACCESS_CODE || "");
 
 const db = process.env.DATABASE_URL ? new Pool({ connectionString: process.env.DATABASE_URL, max: 5 }) : null;
 const jobs = new Map();
@@ -83,7 +85,12 @@ function requireAdmin(req, res, next) {
 }
 function requireDb() { if (!db) throw new Error("Database is not configured."); }
 function normalizeEmail(v) { return String(v || "").trim().toLowerCase(); }
-function publicUser(row) { return { id: row.id, email: row.email, plan: row.plan || "free", createdAt: row.created_at }; }
+function isOwnerAccount(row) { return !!OWNER_EMAIL && normalizeEmail(row?.email) === OWNER_EMAIL; }
+function effectivePlanForUser(row) {
+  return (row?.complimentary_pro || isOwnerAccount(row)) ? "pro" : (row?.plan || "free");
+}
+function effectiveUser(row) { return row ? { ...row, plan: effectivePlanForUser(row) } : row; }
+function publicUser(row) { return { id: row.id, email: row.email, plan: effectivePlanForUser(row), complimentaryPro: !!row.complimentary_pro || isOwnerAccount(row), createdAt: row.created_at }; }
 function planFromPrice(priceId) {
   if (priceId && priceId === priceIds.pro) return "pro";
   if (priceId && priceId === priceIds.creator) return "creator";
@@ -139,7 +146,7 @@ async function currentUser(req) {
   if (!raw) return null;
   const token = decodeURIComponent(raw.slice("ss_session=".length));
   const result = await db.query("SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>NOW()", [hashValue(token)]);
-  return result.rows[0] || null;
+  return effectiveUser(result.rows[0] || null);
 }
 async function requireUser(req, res, next) {
   try {
@@ -161,6 +168,7 @@ async function initDb() {
       email TEXT UNIQUE NOT NULL,
       password_hash TEXT NOT NULL,
       plan TEXT NOT NULL DEFAULT 'free',
+      complimentary_pro BOOLEAN NOT NULL DEFAULT FALSE,
       stripe_customer_id TEXT,
       stripe_subscription_id TEXT,
       stripe_price_id TEXT,
@@ -188,11 +196,12 @@ async function initDb() {
     );
     CREATE INDEX IF NOT EXISTS video_generations_user_created_idx ON video_generations(user_id, created_at);
   `);
+  await db.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS complimentary_pro BOOLEAN NOT NULL DEFAULT FALSE");
 }
 
 async function usageForUser(user) {
   requireDb();
-  const { period, limit } = planLimit(user.plan);
+  const { period, limit } = planLimit(effectivePlanForUser(user));
   const query = period === "day"
     ? "SELECT COUNT(*)::int AS count FROM video_generations WHERE user_id=$1 AND created_at >= date_trunc('day', NOW()) AND status IN ('queued','generating','completed')"
     : "SELECT COUNT(*)::int AS count FROM video_generations WHERE user_id=$1 AND created_at >= date_trunc('month', NOW()) AND status IN ('queued','generating','completed')";
@@ -206,19 +215,20 @@ async function reserveGeneration(user, idea, style, aspectRatio) {
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [user.id]);
     const fresh = (await client.query("SELECT * FROM users WHERE id=$1 FOR UPDATE", [user.id])).rows[0];
-    const { period, limit } = planLimit(fresh.plan);
+    const freshPlan = effectivePlanForUser(fresh);
+    const { period, limit } = planLimit(freshPlan);
     const query = period === "day"
       ? "SELECT COUNT(*)::int AS count FROM video_generations WHERE user_id=$1 AND created_at >= date_trunc('day', NOW()) AND status IN ('queued','generating','completed')"
       : "SELECT COUNT(*)::int AS count FROM video_generations WHERE user_id=$1 AND created_at >= date_trunc('month', NOW()) AND status IN ('queued','generating','completed')";
     const count = Number((await client.query(query, [user.id])).rows[0]?.count || 0);
     if (count >= limit) {
       await client.query("ROLLBACK");
-      return { ok: false, usage: { used: count, limit, remaining: 0, period, plan: fresh.plan } };
+      return { ok: false, usage: { used: count, limit, remaining: 0, period, plan: freshPlan } };
     }
     const jobId = crypto.randomUUID();
     await client.query("INSERT INTO video_generations(job_id,user_id,idea,style,aspect_ratio,status) VALUES($1,$2,$3,$4,$5,'queued')", [jobId, user.id, idea, style, aspectRatio]);
     await client.query("COMMIT");
-    return { ok: true, jobId, usage: { used: count + 1, limit, remaining: Math.max(0, limit - count - 1), period, plan: fresh.plan } };
+    return { ok: true, jobId, usage: { used: count + 1, limit, remaining: Math.max(0, limit - count - 1), period, plan: freshPlan } };
   } catch (err) {
     await client.query("ROLLBACK"); throw err;
   } finally { client.release(); }
@@ -296,7 +306,7 @@ app.post("/api/webhook", express.raw({ type: "application/json" }), async (req, 
           const priceId = sub.items.data[0]?.price?.id;
           const resolvedPlan = planFromPrice(priceId);
           if (resolvedPlan !== "free" || priceId === priceIds.creator || priceId === priceIds.pro) {
-            await db.query("UPDATE users SET stripe_customer_id=$2,stripe_subscription_id=$3,stripe_price_id=$4,plan=$5,updated_at=NOW() WHERE id=$1", [userId, session.customer, sub.id, priceId || null, resolvedPlan]);
+            await db.query("UPDATE users SET stripe_customer_id=$2,stripe_subscription_id=$3,stripe_price_id=$4,plan=CASE WHEN complimentary_pro THEN 'pro' ELSE $5 END,updated_at=NOW() WHERE id=$1", [userId, session.customer, sub.id, priceId || null, resolvedPlan]);
           }
         }
       } else if (event.type === "customer.subscription.updated") {
@@ -307,11 +317,11 @@ app.post("/api/webhook", express.raw({ type: "application/json" }), async (req, 
           const active = ["active", "trialing", "past_due"].includes(sub.status);
           const resolvedPlan = planFromPrice(priceId);
           const finalPlan = active && resolvedPlan !== "free" ? resolvedPlan : "free";
-          await db.query("UPDATE users SET stripe_subscription_id=$2,stripe_price_id=$3,plan=$4,updated_at=NOW() WHERE id=$1", [found.rows[0].id, sub.id, priceId || null, finalPlan]);
+          await db.query("UPDATE users SET stripe_subscription_id=$2,stripe_price_id=$3,plan=CASE WHEN complimentary_pro THEN 'pro' ELSE $4 END,updated_at=NOW() WHERE id=$1", [found.rows[0].id, sub.id, priceId || null, finalPlan]);
         }
       } else if (event.type === "customer.subscription.deleted") {
         const sub = event.data.object;
-        await db.query("UPDATE users SET plan='free',stripe_subscription_id=NULL,stripe_price_id=NULL,updated_at=NOW() WHERE stripe_customer_id=$1 OR stripe_subscription_id=$2", [sub.customer, sub.id]);
+        await db.query("UPDATE users SET plan=CASE WHEN complimentary_pro THEN 'pro' ELSE 'free' END,stripe_subscription_id=NULL,stripe_price_id=NULL,updated_at=NOW() WHERE stripe_customer_id=$1 OR stripe_subscription_id=$2", [sub.customer, sub.id]);
       } else if (event.type === "invoice.paid") {
         const invoice = event.data.object;
         if (invoice.subscription) {
@@ -321,7 +331,7 @@ app.post("/api/webhook", express.raw({ type: "application/json" }), async (req, 
             const priceId = sub.items.data[0]?.price?.id;
             const resolvedPlan = planFromPrice(priceId);
             if (resolvedPlan !== "free") {
-              await db.query("UPDATE users SET stripe_subscription_id=$2,stripe_price_id=$3,plan=$4,updated_at=NOW() WHERE id=$1", [found.rows[0].id, sub.id, priceId || null, resolvedPlan]);
+              await db.query("UPDATE users SET stripe_subscription_id=$2,stripe_price_id=$3,plan=CASE WHEN complimentary_pro THEN 'pro' ELSE $4 END,updated_at=NOW() WHERE id=$1", [found.rows[0].id, sub.id, priceId || null, resolvedPlan]);
             }
           }
         }
@@ -341,13 +351,14 @@ app.use(express.static(__dirname, { dotfiles: "deny", index: false }));
 app.post("/api/auth/signup", sameOrigin, rateLimit("signup", { windowMs: 15 * 60 * 1000, max: 5 }), async (req, res) => {
   try {
     requireDb();
-    const email = normalizeEmail(req.body?.email), password = String(req.body?.password || "");
+    const email = normalizeEmail(req.body?.email), password = String(req.body?.password || ""), developerCode = String(req.body?.developerCode || "");
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ error: "Enter a valid email address." });
     if (password.length < 8) return res.status(400).json({ error: "Password must be at least 8 characters." });
     if (password.length > 128) return res.status(400).json({ error: "Password is too long." });
     const id = crypto.randomUUID();
     const passwordHash = await hashPassword(password);
-    try { await db.query("INSERT INTO users(id,email,password_hash) VALUES($1,$2,$3)", [id, email, passwordHash]); }
+    const complimentaryPro = !!OWNER_EMAIL && email === OWNER_EMAIL && !!OWNER_ACCESS_CODE && developerCode === OWNER_ACCESS_CODE;
+    try { await db.query("INSERT INTO users(id,email,password_hash,complimentary_pro) VALUES($1,$2,$3,$4)", [id, email, passwordHash, complimentaryPro]); }
     catch (err) { if (err.code === "23505") return res.status(409).json({ error: "An account with that email already exists." }); throw err; }
     await createUserSession(res, id);
     res.status(201).json({ user: { id, email, plan: "free" } });
@@ -356,7 +367,7 @@ app.post("/api/auth/signup", sameOrigin, rateLimit("signup", { windowMs: 15 * 60
 app.post("/api/auth/login", sameOrigin, rateLimit("login", { windowMs: 15 * 60 * 1000, max: 10 }), async (req, res) => {
   try {
     requireDb();
-    const email = normalizeEmail(req.body?.email), password = String(req.body?.password || "");
+    const email = normalizeEmail(req.body?.email), password = String(req.body?.password || ""), developerCode = String(req.body?.developerCode || "");
     const result = await db.query("SELECT * FROM users WHERE email=$1", [email]);
     const user = result.rows[0];
     if (!user || !(await verifyPassword(password, user.password_hash))) return res.status(401).json({ error: "Incorrect email or password." });
@@ -364,6 +375,19 @@ app.post("/api/auth/login", sameOrigin, rateLimit("login", { windowMs: 15 * 60 *
     res.json({ user: publicUser(user) });
   } catch (err) { console.error(err); res.status(500).json({ error: "Could not sign in." }); }
 });
+app.post("/api/account/redeem-owner-code", sameOrigin, requireUser, rateLimit("owner-code", { windowMs: 60 * 60 * 1000, max: 5, keyFn: req => req.user.id }), async (req, res) => {
+  try {
+    requireDb();
+    if (!OWNER_EMAIL || !OWNER_ACCESS_CODE) return res.status(503).json({ error: "Owner code is not configured." });
+    if (normalizeEmail(req.user.email) !== OWNER_EMAIL) return res.status(403).json({ error: "This developer code is not valid for this account." });
+    const code = String(req.body?.code || "");
+    if (!code || code !== OWNER_ACCESS_CODE) return res.status(403).json({ error: "Invalid developer code." });
+    await db.query("UPDATE users SET complimentary_pro=TRUE,plan='pro',updated_at=NOW() WHERE id=$1", [req.user.id]);
+    const fresh = (await db.query("SELECT * FROM users WHERE id=$1", [req.user.id])).rows[0];
+    res.json({ ok: true, user: publicUser(fresh), usage: await usageForUser(effectiveUser(fresh)) });
+  } catch (err) { console.error(err); res.status(500).json({ error: "Could not redeem developer access." }); }
+});
+
 app.post("/api/auth/logout", sameOrigin, rateLimit("logout", { windowMs: 5 * 60 * 1000, max: 20 }), async (req, res) => {
   if (db) {
     const raw = req.headers.cookie?.split(";").map(x => x.trim()).find(x => x.startsWith("ss_session="));
@@ -419,6 +443,27 @@ app.post("/api/admin/login", sameOrigin, rateLimit("admin-login", { windowMs: 15
   res.json({ ok: true });
 });
 app.post("/api/admin/logout", sameOrigin, requireAdmin, rateLimit("admin-logout", { windowMs: 5 * 60 * 1000, max: 10 }), (req, res) => { res.setHeader("Set-Cookie", `ss_admin=; ${cookieOptions(0)}`); res.json({ ok: true }); });
+app.post("/api/admin/grant-pro", sameOrigin, requireAdmin, rateLimit("grant-pro", { windowMs: 10 * 60 * 1000, max: 20 }), async (req, res) => {
+  try {
+    requireDb();
+    const email = normalizeEmail(req.body?.email);
+    if (!email) return res.status(400).json({ error: "Enter an email address." });
+    const result = await db.query("UPDATE users SET complimentary_pro=TRUE,plan='pro',updated_at=NOW() WHERE email=$1 RETURNING id,email,plan,complimentary_pro", [email]);
+    if (!result.rows[0]) return res.status(404).json({ error: "No account found for that email." });
+    res.json({ ok: true, user: publicUser(result.rows[0]) });
+  } catch (err) { console.error(err); res.status(500).json({ error: "Could not grant Pro." }); }
+});
+app.post("/api/admin/revoke-pro", sameOrigin, requireAdmin, rateLimit("revoke-pro", { windowMs: 10 * 60 * 1000, max: 20 }), async (req, res) => {
+  try {
+    requireDb();
+    const email = normalizeEmail(req.body?.email);
+    if (!email) return res.status(400).json({ error: "Enter an email address." });
+    const result = await db.query("UPDATE users SET complimentary_pro=FALSE,plan=CASE WHEN stripe_price_id=$2 THEN 'creator' WHEN stripe_price_id=$3 THEN 'pro' ELSE 'free' END,updated_at=NOW() WHERE email=$1 RETURNING id,email,plan,complimentary_pro", [email, priceIds.creator, priceIds.pro]);
+    if (!result.rows[0]) return res.status(404).json({ error: "No account found for that email." });
+    res.json({ ok: true, user: publicUser(result.rows[0]) });
+  } catch (err) { console.error(err); res.status(500).json({ error: "Could not revoke Pro." }); }
+});
+
 app.get("/api/admin/overview", requireAdmin, async (req, res) => {
   if (!stripe) return res.json({ demo: true, available: 0, pending: 0, revenue: 0, paymentCount: 0, activeSubscriptions: 0, payments: [], payouts: [] });
   try {
