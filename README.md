@@ -63,3 +63,8 @@ The player now fetches the protected MP4 as a blob, loads it into a browser obje
 ## v2.2 video player fix
 
 Completed videos are now streamed directly to the browser with HTTP Range support instead of being downloaded into a client-side Blob before playback. This lets the native video player start as soon as it has enough data and is much more reliable on Render's free instance.
+
+
+## Browser/ad-blocker compatibility
+
+ShortSpark does not load advertising scripts, tracking pixels, remote fonts, or third-party JavaScript in the customer UI. Application requests are first-party (`/api/...`). Stripe Checkout remains a necessary external service for payments and is opened as a top-level redirect; a browser extension that blocks Stripe can still prevent checkout, and this build reports that clearly rather than attempting to circumvent the user's blocker.

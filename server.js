@@ -388,7 +388,27 @@ app.post("/api/webhook", express.raw({ type: "application/json" }), async (req, 
   }
 });
 
-app.use(helmet({ contentSecurityPolicy: false }));
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", "data:", "blob:"],
+      mediaSrc: ["'self'", "blob:"],
+      fontSrc: ["'self'", "data:"],
+      connectSrc: ["'self'"],
+      objectSrc: ["'none'"],
+      frameAncestors: ["'none'"],
+      baseUri: ["'self'"],
+      formAction: ["'self'", "https://checkout.stripe.com"],
+      upgradeInsecureRequests: []
+    }
+  },
+  referrerPolicy: { policy: "no-referrer" },
+  crossOriginOpenerPolicy: { policy: "same-origin" },
+  crossOriginResourcePolicy: { policy: "same-origin" }
+}));
 app.use(express.json({ limit: "32kb" }));
 app.use(express.static(__dirname, { dotfiles: "deny", index: false }));
 
