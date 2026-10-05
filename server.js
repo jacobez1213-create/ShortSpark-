@@ -193,10 +193,14 @@ async function initDb() {
       duration_seconds INTEGER NOT NULL DEFAULT 10,
       status TEXT NOT NULL,
       error TEXT,
+      video_data BYTEA,
+      captions_text TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       completed_at TIMESTAMPTZ
     );
     ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS duration_seconds INTEGER NOT NULL DEFAULT 10;
+    ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS video_data BYTEA;
+    ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS captions_text TEXT;
     CREATE INDEX IF NOT EXISTS video_generations_user_created_idx ON video_generations(user_id, created_at);
   `);
   await db.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS complimentary_pro BOOLEAN NOT NULL DEFAULT FALSE");
@@ -638,14 +642,27 @@ async function generateJob(jobId, idea, style, aspectRatio, plan, totalDuration)
       const fmt = sec => `${String(Math.floor(sec / 3600)).padStart(2,"0")}:${String(Math.floor((sec % 3600) / 60)).padStart(2,"0")}:${String(Math.floor(sec % 60)).padStart(2,"0")},000`;
       captions.push(`${i + 1}\n${fmt(start)} --> ${fmt(end)}\n${text}\n`);
     }
-    await fs.writeFile(captionsPath, captions.join("\n"), "utf8");
+    const srtText = captions.join("\n");
+    await fs.writeFile(captionsPath, srtText, "utf8");
+    // Store the finished MP4 in Postgres so the browser can still open it even
+    // if the Render process recycles or the temporary filesystem disappears.
+    const finalBuffer = await fs.readFile(finalPath);
+    const maxPersistBytes = Math.max(1024 * 1024, Number(process.env.MAX_PERSIST_VIDEO_BYTES || 25 * 1024 * 1024));
+    if (db && finalBuffer.length <= maxPersistBytes) {
+      await db.query("UPDATE video_generations SET video_data=$2, captions_text=$3, status='completed', completed_at=NOW() WHERE job_id=$1", [jobId, finalBuffer, srtText]);
+      job.persistentCopy = true;
+    } else if (db) {
+      await db.query("UPDATE video_generations SET captions_text=$2, status='completed', completed_at=NOW() WHERE job_id=$1", [jobId, srtText]);
+      job.persistentCopy = false;
+      console.warn(`[video ${jobId}] MP4 ${finalBuffer.length} bytes exceeds MAX_PERSIST_VIDEO_BYTES=${maxPersistBytes}; local file only.`);
+    }
     Object.assign(job, {
       status: "completed",
       dir, finalPath, captionsPath, progress: 100,
       message: isFree ? "Your 10-second free Short is ready." : `Your ${safeDuration}-second Short is ready.`,
       durationSeconds: safeDuration, outputWidth, outputHeight, plan
     });
-    if (db) await db.query("UPDATE video_generations SET status='completed', completed_at=NOW() WHERE job_id=$1", [jobId]);
+
   } catch (error) {
     console.error(`Video job ${jobId} failed`, error);
     Object.assign(job, { status: "failed", progress: 0, error: error.message || "Video generation failed." });
@@ -698,69 +715,107 @@ app.post("/api/generate-video", sameOrigin, requireUser, rateLimit("video", { wi
     res.status(202).json({ jobId: reservation.jobId, usage: reservation.usage, durationSeconds: reservation.totalDuration });
   } catch (err) { console.error(err); res.status(500).json({ error: "Could not start video generation." }); }
 });
-app.get("/api/video-status/:id", requireUser, (req, res) => {
-  const job = jobs.get(req.params.id); if (!job || job.userId !== req.user.id) return res.status(404).json({ error: "Video job not found." });
-  if (job.status === "completed") return res.json({ status: "completed", progress: 100, message: job.message, durationSeconds: job.durationSeconds, outputWidth: job.outputWidth, outputHeight: job.outputHeight, videoUrl: `/api/generated-video/${req.params.id}`, captionsUrl: `/api/generated-captions/${req.params.id}` });
-  if (job.status === "failed") return res.status(500).json({ status: "failed", error: job.error || "Video generation failed." });
-  res.json({ status: job.status, progress: job.progress, message: job.message });
+app.get("/api/video-status/:id", requireUser, async (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (job && String(job.userId) === String(req.user.id)) {
+    if (job.status === "completed") return res.json({ status: "completed", progress: 100, message: job.message, durationSeconds: job.durationSeconds, outputWidth: job.outputWidth, outputHeight: job.outputHeight, videoUrl: `/api/generated-video/${req.params.id}`, captionsUrl: `/api/generated-captions/${req.params.id}` });
+    if (job.status === "failed") return res.status(500).json({ status: "failed", error: job.error || "Video generation failed." });
+    return res.json({ status: job.status, progress: job.progress, message: job.message });
+  }
+  try {
+    requireDb();
+    const row = (await db.query("SELECT job_id, status, duration_seconds, video_data IS NOT NULL AS has_video, captions_text IS NOT NULL AS has_captions, completed_at, error FROM video_generations WHERE job_id=$1 AND user_id=$2", [req.params.id, req.user.id])).rows[0];
+    if (!row) return res.status(404).json({ error: "Video job not found." });
+    if (row.status === "completed" && row.has_video) return res.json({ status: "completed", progress: 100, message: "Your Short is ready.", durationSeconds: row.duration_seconds, videoUrl: `/api/generated-video/${req.params.id}`, captionsUrl: `/api/generated-captions/${req.params.id}` });
+    if (row.status === "failed") return res.status(500).json({ status: "failed", error: row.error || "Video generation failed." });
+    return res.json({ status: row.status, progress: row.status === "generating" ? 55 : 5, message: row.status === "generating" ? "Generating…" : "Queued…" });
+  } catch (err) {
+    console.error("Video status fallback error", err);
+    return res.status(500).json({ error: "Video status is temporarily unavailable." });
+  }
 });
+async function sendVideoBuffer(req, res, buffer) {
+  const total = buffer.length;
+  res.setHeader("Content-Type", "video/mp4");
+  res.setHeader("Content-Disposition", "inline; filename=shortspark-short.mp4");
+  res.setHeader("Accept-Ranges", "bytes");
+  res.setHeader("Cache-Control", "private, no-store, max-age=0");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  if (req.method === "HEAD") return res.status(200).end();
+  const range = req.headers.range;
+  if (!range) { res.setHeader("Content-Length", total); return res.end(buffer); }
+  const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+  if (!match) { res.setHeader("Content-Range", `bytes */${total}`); return res.status(416).end(); }
+  let start = match[1] ? Number(match[1]) : Math.max(0, total - Number(match[2] || 1));
+  let end = match[2] ? Number(match[2]) : total - 1;
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || start >= total) {
+    res.setHeader("Content-Range", `bytes */${total}`); return res.status(416).end();
+  }
+  end = Math.min(end, total - 1);
+  const chunk = buffer.subarray(start, end + 1);
+  res.status(206);
+  res.setHeader("Content-Range", `bytes ${start}-${end}/${total}`);
+  res.setHeader("Content-Length", chunk.length);
+  return res.end(chunk);
+}
+
 async function streamVideo(req, res) {
   const job = jobs.get(req.params.id);
-  if (!job?.finalPath || job.userId !== req.user.id) return res.status(404).send("Video not found.");
+  if (job && String(job.userId) === String(req.user.id) && job.finalPath) {
+    try {
+      const stat = await fs.stat(job.finalPath);
+      const total = stat.size;
+      res.setHeader("Content-Type", "video/mp4");
+      res.setHeader("Content-Disposition", "inline; filename=shortspark-short.mp4");
+      res.setHeader("Accept-Ranges", "bytes");
+      res.setHeader("Cache-Control", "private, no-store, max-age=0");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      if (req.method === "HEAD") return res.status(200).end();
+      const range = req.headers.range;
+      if (!range) { res.setHeader("Content-Length", total); return fs.createReadStream(job.finalPath).pipe(res); }
+      const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+      if (!match) { res.setHeader("Content-Range", `bytes */${total}`); return res.status(416).end(); }
+      let start = match[1] ? Number(match[1]) : Math.max(0, total - Number(match[2] || 1));
+      let end = match[2] ? Number(match[2]) : total - 1;
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || start >= total) { res.setHeader("Content-Range", `bytes */${total}`); return res.status(416).end(); }
+      end = Math.min(end, total - 1);
+      res.status(206); res.setHeader("Content-Range", `bytes ${start}-${end}/${total}`); res.setHeader("Content-Length", end-start+1);
+      return fs.createReadStream(job.finalPath, { start, end }).pipe(res);
+    } catch (err) { console.warn("Local video file unavailable; trying database copy", err.message); }
+  }
   try {
-    const stat = await fs.stat(job.finalPath);
-    const total = stat.size;
-    res.setHeader("Content-Type", "video/mp4");
-    res.setHeader("Content-Disposition", "inline; filename=shortspark-short.mp4");
-    res.setHeader("Accept-Ranges", "bytes");
-    res.setHeader("Cache-Control", "private, no-store, max-age=0");
-    res.setHeader("X-Content-Type-Options", "nosniff");
-    if (req.method === "HEAD") return res.status(200).end();
-    const range = req.headers.range;
-    if (!range) {
-      res.setHeader("Content-Length", total);
-      return fs.createReadStream(job.finalPath).pipe(res);
-    }
-    const match = /^bytes=(\d*)-(\d*)$/.exec(range);
-    if (!match) {
-      res.setHeader("Content-Range", `bytes */${total}`);
-      return res.status(416).end();
-    }
-    let start = match[1] ? Number(match[1]) : Math.max(0, total - Number(match[2] || 1));
-    let end = match[2] ? Number(match[2]) : total - 1;
-    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || start >= total) {
-      res.setHeader("Content-Range", `bytes */${total}`);
-      return res.status(416).end();
-    }
-    end = Math.min(end, total - 1);
-    res.status(206);
-    res.setHeader("Content-Range", `bytes ${start}-${end}/${total}`);
-    res.setHeader("Content-Length", end - start + 1);
-    fs.createReadStream(job.finalPath, { start, end }).pipe(res);
+    requireDb();
+    const row = (await db.query("SELECT user_id, status, video_data FROM video_generations WHERE job_id=$1 AND user_id=$2", [req.params.id, req.user.id])).rows[0];
+    if (!row || row.status !== "completed" || !row.video_data) return res.status(404).send("Video not found.");
+    return sendVideoBuffer(req, res, row.video_data);
   } catch (err) {
-    console.error("Video stream error", err);
-    res.status(404).send("Video is no longer available.");
+    console.error("Persistent video stream error", err);
+    return res.status(500).send("Video could not be loaded.");
   }
 }
 app.head("/api/generated-video/:id", requireUser, streamVideo);
 app.get("/api/generated-video/:id", requireUser, streamVideo);
 app.get("/api/video-debug/:id", requireUser, async (req, res) => {
   const job = jobs.get(req.params.id);
-  if (!job || job.userId !== req.user.id) return res.status(404).json({ error: "Video job not found." });
-  const out = { status: job.status, progress: job.progress, message: job.message, hasFinalPath: !!job.finalPath };
-  if (job.finalPath) {
-    try {
-      const stat = await fs.stat(job.finalPath);
-      out.size = stat.size;
-      out.contentType = "video/mp4";
-      out.url = `/api/generated-video/${req.params.id}`;
-    } catch (e) {
-      out.fileError = "Final video file is no longer present on this server instance.";
-    }
-  }
-  res.json(out);
+  const info = { status: job?.status || "unknown", hasFinalPath: !!job?.finalPath, localFile: false, persistentCopy: false };
+  if (job?.finalPath) { try { const stat=await fs.stat(job.finalPath); info.localFile=true; info.size=stat.size; } catch (e) { info.fileError="Local final file is unavailable."; } }
+  try {
+    requireDb();
+    const row=(await db.query("SELECT status, octet_length(video_data) AS video_bytes, (captions_text IS NOT NULL) AS has_captions FROM video_generations WHERE job_id=$1 AND user_id=$2",[req.params.id,req.user.id])).rows[0];
+    if(row){info.status=row.status;info.persistentCopy=Number(row.video_bytes||0)>0;info.persistentBytes=Number(row.video_bytes||0);info.hasCaptions=!!row.has_captions;}
+  } catch (e) { info.databaseError="Database lookup failed."; }
+  res.json(info);
 });
-app.get("/api/generated-captions/:id", requireUser, (req, res) => { const job = jobs.get(req.params.id); if (!job?.captionsPath || job.userId !== req.user.id) return res.status(404).send("Captions not found."); res.type("text/plain").sendFile(job.captionsPath); });
+app.get("/api/generated-captions/:id", requireUser, async (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (job && String(job.userId) === String(req.user.id) && job.captionsPath) { try { return res.type("text/plain").sendFile(job.captionsPath); } catch {} }
+  try {
+    requireDb();
+    const row=(await db.query("SELECT captions_text FROM video_generations WHERE job_id=$1 AND user_id=$2 AND status='completed'",[req.params.id,req.user.id])).rows[0];
+    if (!row?.captions_text) return res.status(404).send("Captions not found.");
+    return res.type("text/plain").send(row.captions_text);
+  } catch (err) { console.error("Captions fallback error",err); return res.status(500).send("Captions could not be loaded."); }
+});
 
 setInterval(async () => {
   const cutoff = Date.now() - 60 * 60 * 1000;
