@@ -38,6 +38,22 @@ radial-gradient(circle at 50% 18%,#241c45,transparent 38%),#05060b}
 
 .script-panel{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}.field-note{font-size:11px;color:#7d879e;line-height:1.45;margin-top:6px}.field-title{display:flex;align-items:center;justify-content:space-between;gap:8px}.tag{font-size:10px;padding:4px 7px;border-radius:7px;background:#171a2b;border:1px solid #2a3043;color:#aeb6cb;font-weight:800}.voice-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}
 @media(max-width:820px){.script-panel,.voice-row{grid-template-columns:1fr}}
+
+.compat{position:fixed;right:18px;bottom:18px;max-width:360px;padding:12px 14px;background:#171a2a;border:1px solid #343a4d;border-radius:12px;color:#d7dced;font-size:12px;line-height:1.45;box-shadow:0 14px 40px #0008;z-index:9998}
+.billing-error{max-width:760px;margin:12px auto 0;padding:11px 13px;border-radius:11px;background:#35171d;border:1px solid #66232e;color:#ff9da5;font-size:12px}
+.support-launch{position:fixed;right:20px;bottom:20px;z-index:10000;border:0;border-radius:999px;padding:13px 16px;background:linear-gradient(135deg,var(--a),#a65cff);color:#fff;font-weight:900;box-shadow:0 14px 36px #0008;cursor:pointer}
+.support-panel{position:fixed;right:20px;bottom:78px;width:min(380px,calc(100vw - 28px));height:520px;display:none;flex-direction:column;z-index:10001;background:#0d101b;border:1px solid #2a3045;border-radius:18px;box-shadow:0 24px 70px #000b;overflow:hidden}
+.support-widget.open .support-panel{display:flex}
+.support-head{display:flex;align-items:center;justify-content:space-between;padding:14px 15px;border-bottom:1px solid #252a3e;background:#121627}
+.support-head strong{font-size:14px}.support-head span{font-size:11px;color:#7f889e;display:block;margin-top:2px}
+.support-close{background:#171a2a;border:1px solid #2b3044;color:#fff;border-radius:9px;width:30px;height:30px;cursor:pointer}
+.support-messages{flex:1;padding:14px;overflow:auto;display:flex;flex-direction:column;gap:10px}
+.support-msg{max-width:88%}.support-msg.user{align-self:flex-end}.support-msg.assistant{align-self:flex-start}.support-label{font-size:10px;text-transform:uppercase;letter-spacing:.6px;font-weight:900;color:#747e96;margin:0 0 4px 3px}.support-msg.user .support-label{text-align:right;margin-right:3px}
+.support-bubble{padding:10px 12px;border-radius:13px;background:#161a2a;border:1px solid #2a3044;color:#dfe4f3;font-size:12px;line-height:1.5;white-space:pre-wrap}
+.support-msg.user .support-bubble{background:#322666;border-color:#5643a0}
+.support-composer{display:flex;gap:8px;padding:12px;border-top:1px solid #252a3e}.support-composer textarea{flex:1;min-height:46px;max-height:100px;resize:none;background:#090c15;border:1px solid #2b3045;color:#fff;border-radius:11px;padding:10px;font:inherit;outline:none}.support-composer textarea:focus{border-color:var(--a)}.support-send{border:0;border-radius:11px;background:linear-gradient(135deg,var(--a),#a65cff);color:#fff;font-weight:900;padding:0 14px;cursor:pointer}.support-send:disabled{opacity:.55;cursor:not-allowed}
+@media(max-width:560px){.support-launch{right:14px;bottom:14px}.support-panel{right:14px;bottom:68px;height:70vh}}
+
 </style></head>
 <body>
 <nav class="nav"><a class="logo" href="/">Short<i>Spark</i></a><div class="links"><a href="#generator">Generator</a><a href="#pricing">Pricing</a><a href="/account">Account</a><a href="/admin">Developer</a></div><a class="btn" href="#generator">Create a Short</a></nav>
@@ -104,6 +120,21 @@ radial-gradient(circle at 50% 18%,#241c45,transparent 38%),#05060b}
   </div>
 </div></div></section>
 <section class="section"><h2>What it creates</h2><p class="sub">The generator now goes beyond scripts and produces a real previewable video.</p><div class="cards"><div class="card">🎥<h3>3 connected scenes</h3><p>Each clip advances the same idea instead of producing unrelated shots.</p></div><div class="card">🔊<h3>Synchronized audio</h3><p>The selected model can generate dialogue, music and sound effects with the video.</p></div><div class="card">📱<h3>Short-form ready</h3><p>Vertical 9:16 is the default for Shorts, TikTok and Reels.</p></div></div></section>
-<section class="section" id="pricing"><h2>Creator plans</h2><p class="sub">Your existing Stripe subscriptions stay connected.</p><div class="prices"><div class="price"><h3>Free</h3><div class="amt">$0 <small>/ month</small></div><ul><li>1 video per day</li><li>10 seconds</li><li>360p delivery</li></ul><a class="btn alt" href="#generator">Try it</a></div><div class="price hot"><h3>Creator</h3><div class="amt">$8.99 <small>/ month</small></div><ul><li>10 videos / month</li><li>30-second videos</li><li>480p delivery</li><li>Premium styles</li></ul><button class="btn" onclick="checkout('creator')">Subscribe with Stripe →</button></div><div class="price"><h3>Pro</h3><div class="amt">$15.99 <small>/ month</small></div><ul><li>24 videos / month</li><li>30-second videos</li><li>480p delivery</li><li>Brand presets</li></ul><button class="btn alt" onclick="checkout('pro')">Subscribe with Stripe →</button></div><div class="notice" style="margin-top:14px">Paid customers get the prompt helper, 5–30 second duration control, 480p delivery, faster AI generation, connected-scene storytelling, MP4/caption downloads, and plan-based monthly video allowances.</div></section>
+<section class="section" id="pricing"><h2>Creator plans</h2><p class="sub">Your existing Stripe subscriptions stay connected.</p><div class="prices"><div class="price"><h3>Free</h3><div class="amt">$0 <small>/ month</small></div><ul><li>1 video per day</li><li>10 seconds</li><li>360p delivery</li></ul><a class="btn alt" href="#generator">Try it</a></div><div class="price hot"><h3>Creator</h3><div class="amt">$8.99 <small>/ month</small></div><ul><li>10 videos / month</li><li>30-second videos</li><li>480p delivery</li><li>Premium styles</li></ul><button type="button" class="btn" data-plan="creator">Subscribe with Stripe →</button></div><div class="price"><h3>Pro</h3><div class="amt">$15.99 <small>/ month</small></div><ul><li>24 videos / month</li><li>30-second videos</li><li>480p delivery</li><li>Brand presets</li></ul><button type="button" class="btn alt" data-plan="pro">Subscribe with Stripe →</button></div><div class="notice" style="margin-top:14px">Paid customers get the prompt helper, 5–30 second duration control, 480p delivery, faster AI generation, connected-scene storytelling, MP4/caption downloads, and plan-based monthly video allowances.</div></section>
 <footer>© 2026 ShortSpark · <a href="/admin">Developer dashboard</a></footer>
-<script src="/app.js" defer></script><div id="compatNote" class="compat" hidden>ShortSpark uses first-party app requests. Your browser may still block Stripe Checkout if a privacy extension blocks Stripe; in that case, allow checkout.stripe.com for payments.</div></body></html>
+<script src="/app.js" defer></script><div id="compatNote" class="compat" hidden>ShortSpark uses first-party app requests. Your browser may still block Stripe Checkout if a privacy extension blocks Stripe; in that case, allow checkout.stripe.com for payments.</div>
+<div id="supportWidget" class="support-widget">
+  <button id="supportToggle" type="button" class="support-launch" aria-label="Open ShortSpark AI customer support">💬 AI Support</button>
+  <div class="support-panel" role="dialog" aria-label="ShortSpark AI customer support">
+    <div class="support-head">
+      <div><strong>ShortSpark AI Support</strong><span>Plans, billing, prompts & troubleshooting</span></div>
+      <button id="supportClose" type="button" class="support-close" aria-label="Close support">×</button>
+    </div>
+    <div id="supportMessages" class="support-messages"></div>
+    <div class="support-composer">
+      <textarea id="supportInput" placeholder="Ask a question…" maxlength="1200"></textarea>
+      <button id="supportSend" type="button" class="support-send">Send</button>
+    </div>
+  </div>
+</div>
+</body></html>

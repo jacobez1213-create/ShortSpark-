@@ -1,5 +1,6 @@
 import express from "express";
 import Stripe from "stripe";
+import OpenAI from "openai";
 import Replicate from "replicate";
 import ffmpegPath from "ffmpeg-static";
 import { Pool } from "pg";
@@ -21,6 +22,24 @@ const __dirname = path.dirname(__filename);
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "change-me";
 const COOKIE_SECRET = process.env.COOKIE_SECRET || ADMIN_PASSWORD;
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
+const openai = process.env.OPENAI_API_KEY
+  ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+  : null;
+const SUPPORT_MODEL = process.env.SUPPORT_MODEL || "gpt-5.5";
+const SUPPORT_MAX_MESSAGES = 8;
+const SUPPORT_SYSTEM_PROMPT = `You are ShortSpark's friendly AI customer-support agent.
+You help customers use the ShortSpark website, understand plans, create better prompts, generate AI videos, and troubleshoot common issues.
+Current plans:
+- Free: 1 video per day, 10-second videos, 360p delivery.
+- Creator: $8.99/month, 10 videos/month, 5-30 second videos, 480p delivery, premium styles, prompt helper, MP4/caption downloads, connected-scene storytelling.
+- Pro: $15.99/month, 24 videos/month, 5-30 second videos, 480p delivery, priority generation, brand presets, all Creator benefits.
+Video engine: Wan 2.2 5B Fast at 480p for the current build.
+Do not invent refunds, credits, subscriptions, or features that are not listed.
+Never ask for or repeat passwords, Stripe secret keys, webhook secrets, database URLs, or Replicate/OpenAI API keys.
+Never claim you can see or modify a customer's private billing data unless the server explicitly provides it.
+Keep answers concise, friendly, and practical. For technical problems, give one or two clear next steps.
+If a user asks for a cancellation/refund, explain that they should use their Stripe customer portal when available or contact the business owner; do not pretend to issue the refund yourself.`;
+
 const replicate = process.env.REPLICATE_API_TOKEN ? new Replicate({ auth: process.env.REPLICATE_API_TOKEN }) : null;
 const priceIds = { creator: process.env.STRIPE_PRICE_CREATOR, pro: process.env.STRIPE_PRICE_PRO };
 const VIDEO_MODEL = "wan-video/wan-2.2-5b-fast";
@@ -560,6 +579,61 @@ app.post("/api/create-checkout-session", sameOrigin, requireUser, rateLimit("che
     res.json({ url: session.url });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message || "Could not create Stripe Checkout session." }); }
 });
+
+
+app.post("/api/support/chat",
+  sameOrigin,
+  rateLimit("support-chat", {
+    windowMs: 5 * 60 * 1000,
+    max: 12,
+    keyFn: req => req.user?.id ? `user:${req.user.id}` : `ip:${req.ip}`
+  }),
+  async (req, res) => {
+    const rawMessages = Array.isArray(req.body?.messages) ? req.body.messages : [];
+    const messages = rawMessages
+      .slice(-SUPPORT_MAX_MESSAGES)
+      .filter(m => m && (m.role === "user" || m.role === "assistant"))
+      .map(m => ({
+        role: m.role,
+        content: String(m.content || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 1200)
+      }))
+      .filter(m => m.content);
+
+    if (!messages.length || messages[messages.length - 1].role !== "user") {
+      return res.status(400).json({ error: "Send a customer-support question first." });
+    }
+
+    const last = messages[messages.length - 1].content;
+    if (!last || last.length < 2) return res.status(400).json({ error: "Your message is too short." });
+
+    const accountContext = req.user
+      ? `The signed-in customer account is authenticated. Their current server-reported plan is ${req.user.plan || "free"}.`
+      : "The visitor is not signed in. Do not assume a paid plan.";
+
+    try {
+      if (!openai) {
+        return res.json({
+          source: "faq",
+          answer: "AI support isn't connected on this deployment yet. For now: Free includes 1 video/day; Creator is $8.99/month for 10 videos/month; Pro is $15.99/month for 24 videos/month. For account or payment help, sign in and check /account."
+        });
+      }
+
+      const response = await openai.responses.create({
+        model: SUPPORT_MODEL,
+        instructions: `${SUPPORT_SYSTEM_PROMPT}\n${accountContext}`,
+        input: messages
+      });
+
+      const answer = String(response.output_text || "").trim();
+      if (!answer) throw new Error("The support model returned no text.");
+      res.json({ source: "ai", answer: answer.slice(0, 2200) });
+    } catch (err) {
+      console.error("Support AI error:", err);
+      res.status(502).json({
+        error: "Customer support is temporarily unavailable. Please try again in a moment."
+      });
+    }
+  });
 
 app.post("/api/admin/login", sameOrigin, rateLimit("admin-login", { windowMs: 15 * 60 * 1000, max: 5 }), (req, res) => {
   if (req.body?.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "Incorrect password." });

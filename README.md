@@ -101,3 +101,11 @@ The generator now accepts three explicit creative controls:
 - **Voice emotion:** excited, suspenseful, warm, dramatic, or calm.
 
 The Inworld Realtime TTS 1.5 Mini model supports expressive audio markups such as `[happy]`, `[surprised]`, and `[fearful]`, plus pauses. ShortSpark maps the selected emotion into those markups and uses the `Alex` voice by default because the current model documentation describes it as energetic and expressive. 
+
+
+## v3.1 checkout + AI support
+
+- Creator and Pro pricing buttons now use delegated event handling in `billing.js`, which avoids silent failures from inline handlers and shows a visible checkout error.
+- A floating **AI Support** chat is included on the home and account pages.
+- AI support uses the OpenAI Responses API on the server; the OpenAI key stays in Render environment variables. If no key is configured, ShortSpark falls back to a built-in support FAQ message.
+- Add `OPENAI_API_KEY` and optionally `SUPPORT_MODEL=gpt-5.5` to Render to enable AI support.
