@@ -86,3 +86,8 @@ The generator UI JavaScript is served from a dedicated `/app.js` file with `defe
 
 ## v2.7 completion-state fix
 The generator now explicitly marks in-memory jobs as `completed` when the final MP4 and captions are ready. The status endpoint also returns the output duration and dimensions. This prevents the UI from remaining on "Starting/Generating" while displaying a ready message.
+
+
+## v2.9 paid prompt helper
+
+Paid users now get an in-app prompt example and copy/use controls. The helper clearly lists paid benefits: 5–30 second duration selection, 480p delivery, fast Wan 2.2 5B generation, connected scenes, MP4 and captions downloads, and paid plan monthly allowances. The helper is hidden from free accounts.
