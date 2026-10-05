@@ -82,3 +82,7 @@ ShortSpark does not load advertising scripts, tracking pixels, remote fonts, or 
 
 ## v2.6
 The generator UI JavaScript is served from a dedicated `/app.js` file with `defer`, instead of an inline script. This avoids browser/CSP/extension issues that can leave the Generate button inert.
+
+
+## v2.7 completion-state fix
+The generator now explicitly marks in-memory jobs as `completed` when the final MP4 and captions are ready. The status endpoint also returns the output duration and dimensions. This prevents the UI from remaining on "Starting/Generating" while displaying a ready message.

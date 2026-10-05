@@ -1,4 +1,5 @@
 let timer;
+let pollStartedAt=0;
 function safe(s){return String(s||'').replace(/[<>]/g,'').trim()}
 function status(state,badge){document.getElementById('state').textContent=state;document.getElementById('badge').textContent=badge}
 function progress(v,msg){
@@ -64,6 +65,7 @@ async function generateVideo(){
    try{d=await r.json()}catch{}
    if(!r.ok)throw new Error(d.error||`The generator returned HTTP ${r.status}.`);
    if(!d.jobId)throw new Error('The generator started without returning a video job ID.');
+   pollStartedAt=Date.now();
    poll(d.jobId);
  }catch(e){
    if(e.name==='AbortError')showError('The generator took too long to respond. Open Render Logs to check whether the AI job started.');
@@ -131,12 +133,13 @@ async function loadCompletedVideo(jobId, d){
 }
 async function poll(id){
  try{
+  if (Date.now()-pollStartedAt > 15*60*1000) throw new Error('Video generation is taking longer than expected. Check Render Logs for the job status.');
   const r=await fetch('/api/video-status/'+encodeURIComponent(id),{credentials:'include',cache:'no-store'});
   const d=await r.json();
   if(d.status==='failed'||!r.ok) throw new Error(d.error||'Video generation failed.');
   progress(d.progress||0,d.message||'Generating…');
   status(d.status==='completed'?'Complete…':'Generating…',d.status==='completed'?'DONE':'WORKING');
-  if(d.status==='completed'){await loadCompletedVideo(id,d);document.getElementById('generate').disabled=false;return}
+  if(d.status==='completed'){document.getElementById('generate').disabled=false;document.getElementById('generate').textContent='Generate AI Short ✨';await loadCompletedVideo(id,d);return}
   timer=setTimeout(()=>poll(id),1000);
  }catch(e){showError(e.message);const b=document.getElementById('generate');b.disabled=false;b.textContent=document.getElementById('durationWrap').style.display==='none'?'Generate 10-second free Short ✨':'Generate AI Short ✨'}
 }

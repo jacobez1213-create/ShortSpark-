@@ -640,6 +640,7 @@ async function generateJob(jobId, idea, style, aspectRatio, plan, totalDuration)
     }
     await fs.writeFile(captionsPath, captions.join("\n"), "utf8");
     Object.assign(job, {
+      status: "completed",
       dir, finalPath, captionsPath, progress: 100,
       message: isFree ? "Your 10-second free Short is ready." : `Your ${safeDuration}-second Short is ready.`,
       durationSeconds: safeDuration, outputWidth, outputHeight, plan
@@ -699,7 +700,7 @@ app.post("/api/generate-video", sameOrigin, requireUser, rateLimit("video", { wi
 });
 app.get("/api/video-status/:id", requireUser, (req, res) => {
   const job = jobs.get(req.params.id); if (!job || job.userId !== req.user.id) return res.status(404).json({ error: "Video job not found." });
-  if (job.status === "completed") return res.json({ status: "completed", progress: 100, message: job.message, videoUrl: `/api/generated-video/${req.params.id}`, captionsUrl: `/api/generated-captions/${req.params.id}` });
+  if (job.status === "completed") return res.json({ status: "completed", progress: 100, message: job.message, durationSeconds: job.durationSeconds, outputWidth: job.outputWidth, outputHeight: job.outputHeight, videoUrl: `/api/generated-video/${req.params.id}`, captionsUrl: `/api/generated-captions/${req.params.id}` });
   if (job.status === "failed") return res.status(500).json({ status: "failed", error: job.error || "Video generation failed." });
   res.json({ status: job.status, progress: job.progress, message: job.message });
 });
