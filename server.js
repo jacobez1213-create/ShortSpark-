@@ -42,7 +42,7 @@ If a user asks for a cancellation/refund, explain that they should use their Str
 
 const replicate = process.env.REPLICATE_API_TOKEN ? new Replicate({ auth: process.env.REPLICATE_API_TOKEN }) : null;
 const SUPABASE_URL = String(process.env.SUPABASE_URL || '').replace(/\/$/, '');
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY || '';
 const SUPABASE_STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET || 'shortspark-videos';
 const cloudStorage = !!(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
 const priceIds = { creator: process.env.STRIPE_PRICE_CREATOR, pro: process.env.STRIPE_PRICE_PRO };
@@ -577,20 +577,67 @@ async function downloadTo(url, file) {
   await fs.writeFile(file, Buffer.from(await response.arrayBuffer()));
 }
 
-async function uploadToCloudStorage(file, storagePath, contentType = "video/mp4") {
-  if (!cloudStorage) throw new Error("Cloud storage is not configured. Add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.");
-  const data = await fs.readFile(file);
-  const response = await fetch(`${SUPABASE_URL}/storage/v1/object/${encodeURIComponent(SUPABASE_STORAGE_BUCKET)}/${storagePath.split('/').map(encodeURIComponent).join('/')}`, {
+async function ensureCloudStorageBucket() {
+  if (!cloudStorage) throw new Error("Cloud storage is not configured. Add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (your Supabase secret key) to the server environment.");
+  if (!/^https:\/\/[a-z0-9-]+\.supabase\.co$/i.test(SUPABASE_URL)) {
+    throw new Error("Cloud storage configuration error: SUPABASE_URL must be your Supabase Project URL, such as https://YOUR_PROJECT.supabase.co.");
+  }
+  if (/^sb_publishable_/i.test(SUPABASE_SERVICE_ROLE_KEY)) {
+    throw new Error("Cloud storage configuration error: you entered the Supabase publishable key. Use the Secret key (sb_secret_...) on the server instead.");
+  }
+  if (!/^sb_secret_/i.test(SUPABASE_SERVICE_ROLE_KEY) && !/^eyJ/i.test(SUPABASE_SERVICE_ROLE_KEY)) {
+    console.warn("Supabase key does not look like a current sb_secret_ key; continuing so Supabase can return the exact authentication error.");
+  }
+  const headers = {
+    Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+    apikey: SUPABASE_SERVICE_ROLE_KEY,
+    "Content-Type": "application/json"
+  };
+  const bucketUrl = `${SUPABASE_URL}/storage/v1/bucket/${encodeURIComponent(SUPABASE_STORAGE_BUCKET)}`;
+  const check = await fetch(bucketUrl, { headers });
+  if (check.ok) return;
+  const checkBody = await check.text().catch(() => "");
+  if (check.status !== 404) {
+    throw new Error(`Cloud storage bucket check failed (${check.status})${checkBody ? `: ${checkBody.slice(0, 500)}` : ""}`);
+  }
+  const create = await fetch(`${SUPABASE_URL}/storage/v1/bucket`, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-      apikey: SUPABASE_SERVICE_ROLE_KEY,
-      "Content-Type": contentType,
-      "x-upsert": "true"
-    },
-    body: data
+    headers,
+    body: JSON.stringify({ id: SUPABASE_STORAGE_BUCKET, name: SUPABASE_STORAGE_BUCKET, public: false })
   });
-  if (!response.ok) throw new Error(`Cloud storage upload failed (${response.status}).`);
+  if (!create.ok && create.status !== 409) {
+    const body = await create.text().catch(() => "");
+    throw new Error(`Cloud storage bucket creation failed (${create.status})${body ? `: ${body.slice(0, 500)}` : ""}`);
+  }
+}
+
+async function uploadToCloudStorage(file, storagePath, contentType = "video/mp4") {
+  if (!cloudStorage) throw new Error("Cloud storage is not configured. Add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY to the server environment.");
+  await ensureCloudStorageBucket();
+  const data = await fs.readFile(file);
+  const objectUrl = `${SUPABASE_URL}/storage/v1/object/${encodeURIComponent(SUPABASE_STORAGE_BUCKET)}/${storagePath.split('/').map(encodeURIComponent).join('/')}`;
+  const headers = {
+    Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+    apikey: SUPABASE_SERVICE_ROLE_KEY,
+    "Content-Type": contentType,
+    "Cache-Control": "3600",
+    "x-upsert": "true"
+  };
+
+  // Supabase Storage accepts POST for uploads. Retry with PUT because some
+  // Storage deployments/proxies handle PUT more reliably for binary bodies.
+  let response = await fetch(objectUrl, { method: "POST", headers, body: data });
+  if (!response.ok && (response.status === 400 || response.status === 405 || response.status === 415)) {
+    const firstBody = await response.text().catch(() => "");
+    response = await fetch(objectUrl, { method: "PUT", headers, body: data });
+    if (!response.ok) {
+      const secondBody = await response.text().catch(() => "");
+      throw new Error(`Cloud storage upload failed (POST ${response.status === 0 ? "" : response.status}; PUT ${response.status})${secondBody || firstBody ? `: ${(secondBody || firstBody).slice(0, 800)}` : ""}`);
+    }
+  } else if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(`Cloud storage upload failed (${response.status})${body ? `: ${body.slice(0, 800)}` : ""}`);
+  }
   return storagePath;
 }
 
