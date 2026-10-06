@@ -145,3 +145,6 @@ The server no longer accepts a valid-but-wrong recurring price (for example $11.
 ## v3.5 AI support
 
 The support endpoint uses the OpenAI Responses API with `gpt-6-luna` by default. Add `OPENAI_API_KEY` to Render. The key stays server-side and is never shipped to the browser.
+
+## Cloud video storage
+ShortSpark can store completed MP4s in a private Supabase Storage bucket instead of Postgres or the Render filesystem. Set `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `SUPABASE_STORAGE_BUCKET` in production, and create the bucket with the same name. The server generates short-lived signed URLs after checking the logged-in user's database record.

@@ -41,6 +41,10 @@ Keep answers concise, friendly, and practical. For technical problems, give one 
 If a user asks for a cancellation/refund, explain that they should use their Stripe customer portal when available or contact the business owner; do not pretend to issue the refund yourself.`;
 
 const replicate = process.env.REPLICATE_API_TOKEN ? new Replicate({ auth: process.env.REPLICATE_API_TOKEN }) : null;
+const SUPABASE_URL = String(process.env.SUPABASE_URL || '').replace(/\/$/, '');
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+const SUPABASE_STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET || 'shortspark-videos';
+const cloudStorage = !!(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
 const priceIds = { creator: process.env.STRIPE_PRICE_CREATOR, pro: process.env.STRIPE_PRICE_PRO };
 const DEFAULT_FIRST_USER_SUPPORT_CODE = "SHORTSPARK50";
 const FIRST_USER_SUPPORT_CODE = String(process.env.FIRST_USER_SUPPORT_CODE || DEFAULT_FIRST_USER_SUPPORT_CODE)
@@ -379,6 +383,7 @@ async function initDb() {
       status TEXT NOT NULL,
       error TEXT,
       video_data BYTEA,
+      storage_path TEXT,
       captions_text TEXT,
       narration_script TEXT,
       subject_action TEXT,
@@ -389,6 +394,7 @@ async function initDb() {
     );
     ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS duration_seconds INTEGER NOT NULL DEFAULT 10;
     ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS video_data BYTEA;
+    ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS storage_path TEXT;
     ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS captions_text TEXT;
     ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS narration_script TEXT;
     ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS subject_action TEXT;
@@ -568,6 +574,44 @@ async function downloadTo(url, file) {
   if (!response.ok) throw new Error(`Could not download generated video (${response.status}).`);
   await fs.writeFile(file, Buffer.from(await response.arrayBuffer()));
 }
+
+async function uploadToCloudStorage(file, storagePath, contentType = "video/mp4") {
+  if (!cloudStorage) throw new Error("Cloud storage is not configured. Add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.");
+  const data = await fs.readFile(file);
+  const response = await fetch(`${SUPABASE_URL}/storage/v1/object/${encodeURIComponent(SUPABASE_STORAGE_BUCKET)}/${storagePath.split('/').map(encodeURIComponent).join('/')}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      apikey: SUPABASE_SERVICE_ROLE_KEY,
+      "Content-Type": contentType,
+      "x-upsert": "true"
+    },
+    body: data
+  });
+  if (!response.ok) throw new Error(`Cloud storage upload failed (${response.status}).`);
+  return storagePath;
+}
+
+async function createCloudSignedUrl(storagePath, expiresIn = 3600) {
+  if (!cloudStorage || !storagePath) return null;
+  const response = await fetch(`${SUPABASE_URL}/storage/v1/object/sign/${encodeURIComponent(SUPABASE_STORAGE_BUCKET)}/${storagePath.split('/').map(encodeURIComponent).join('/')}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`, apikey: SUPABASE_SERVICE_ROLE_KEY, "Content-Type": "application/json" },
+    body: JSON.stringify({ expiresIn })
+  });
+  if (!response.ok) throw new Error(`Cloud storage signed URL failed (${response.status}).`);
+  const data = await response.json();
+  return `${SUPABASE_URL}/storage/v1${data.signedURL}`;
+}
+
+async function deleteCloudObject(storagePath) {
+  if (!cloudStorage || !storagePath) return;
+  await fetch(`${SUPABASE_URL}/storage/v1/object/${encodeURIComponent(SUPABASE_STORAGE_BUCKET)}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`, apikey: SUPABASE_SERVICE_ROLE_KEY, "Content-Type": "application/json" },
+    body: JSON.stringify({ prefixes: [storagePath] })
+  });
+}
 function buildStoryPlan(idea, style, sceneCount, subjectAction) {
   const pace = {
     "Fast & viral": "fast pacing, punchy visual changes, energetic camera motion",
@@ -658,7 +702,8 @@ app.use(helmet({
       imgSrc: ["'self'", "data:", "blob:"],
       mediaSrc: ["'self'", "blob:"],
       fontSrc: ["'self'", "data:"],
-      connectSrc: ["'self'"],
+      connectSrc: ["'self'", ...(SUPABASE_URL ? [SUPABASE_URL] : [])],
+      mediaSrc: ["'self'", "blob:", ...(SUPABASE_URL ? [SUPABASE_URL] : [])],
       objectSrc: ["'none'"],
       frameAncestors: ["'none'"],
       baseUri: ["'self'"],
@@ -1066,17 +1111,15 @@ async function generateJob(jobId, idea, style, aspectRatio, plan, totalDuration,
     }
     const srtText = captions.join("\n");
     await fs.writeFile(captionsPath, srtText, "utf8");
-    // Store the finished MP4 in Postgres so the browser can still open it even
-    // if the Render process recycles or the temporary filesystem disappears.
-    const finalBuffer = await fs.readFile(finalPath);
-    const maxPersistBytes = Math.max(1024 * 1024, Number(process.env.MAX_PERSIST_VIDEO_BYTES || 25 * 1024 * 1024));
-    if (db && finalBuffer.length <= maxPersistBytes) {
-      await db.query("UPDATE video_generations SET video_data=$2, captions_text=$3, status='completed', completed_at=NOW() WHERE job_id=$1", [jobId, finalBuffer, srtText]);
-      job.persistentCopy = true;
-    } else if (db) {
-      await db.query("UPDATE video_generations SET captions_text=$2, status='completed', completed_at=NOW() WHERE job_id=$1", [jobId, srtText]);
-      job.persistentCopy = false;
-      console.warn(`[video ${jobId}] MP4 ${finalBuffer.length} bytes exceeds MAX_PERSIST_VIDEO_BYTES=${maxPersistBytes}; local file only.`);
+    let storagePath = null;
+    if (cloudStorage) {
+      job.progress = 94; job.message = "Saving your Short to secure cloud storage…";
+      storagePath = `users/${job.userId}/${jobId}.mp4`;
+      await uploadToCloudStorage(finalPath, storagePath, "video/mp4");
+    }
+    if (db) {
+      await db.query("UPDATE video_generations SET storage_path=$2, video_data=NULL, captions_text=$3, status='completed', completed_at=NOW() WHERE job_id=$1", [jobId, storagePath, srtText]);
+      job.persistentCopy = !!storagePath;
     }
     Object.assign(job, {
       status: "completed",
@@ -1131,6 +1174,7 @@ app.post("/api/generate-video", sameOrigin, requireUser, rateLimit("video", { wi
   if (!idea) return res.status(400).json({ error: "Enter an idea first." });
   if (!replicate) return res.status(503).json({ error: "AI video is not configured yet. Add REPLICATE_API_TOKEN to Render." });
   if (!db) return res.status(503).json({ error: "Accounts are not configured yet. Add DATABASE_URL to Render." });
+  if (!cloudStorage) return res.status(503).json({ error: "Cloud video storage is not configured yet. Add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY to Render." });
   if (jobs.size > 10) return res.status(429).json({ error: "The generator is busy. Try again in a minute." });
   try {
     const reservation = await reserveGeneration(req.user, idea, style, aspectRatio, requestedDuration, narrationScript, subjectAction, voiceEmotion, voiceDirection);
@@ -1150,9 +1194,9 @@ app.get("/api/video-status/:id", requireUser, async (req, res) => {
   }
   try {
     requireDb();
-    const row = (await db.query("SELECT job_id, status, duration_seconds, video_data IS NOT NULL AS has_video, captions_text IS NOT NULL AS has_captions, completed_at, error FROM video_generations WHERE job_id=$1 AND user_id=$2", [req.params.id, req.user.id])).rows[0];
+    const row = (await db.query("SELECT job_id, status, duration_seconds, storage_path, video_data IS NOT NULL AS has_video, captions_text IS NOT NULL AS has_captions, completed_at, error FROM video_generations WHERE job_id=$1 AND user_id=$2", [req.params.id, req.user.id])).rows[0];
     if (!row) return res.status(404).json({ error: "Video job not found." });
-    if (row.status === "completed" && row.has_video) return res.json({ status: "completed", progress: 100, message: "Your Short is ready.", durationSeconds: row.duration_seconds, videoUrl: `/api/generated-video/${req.params.id}`, captionsUrl: `/api/generated-captions/${req.params.id}` });
+    if (row.status === "completed" && row.storage_path) return res.json({ status: "completed", progress: 100, message: "Your Short is ready.", durationSeconds: row.duration_seconds, videoUrl: `/api/generated-video/${req.params.id}`, captionsUrl: `/api/generated-captions/${req.params.id}` });
     if (row.status === "failed") return res.status(500).json({ status: "failed", error: row.error || "Video generation failed." });
     return res.json({ status: row.status, progress: row.status === "generating" ? 55 : 5, message: row.status === "generating" ? "Generating…" : "Queued…" });
   } catch (err) {
@@ -1186,52 +1230,29 @@ async function sendVideoBuffer(req, res, buffer) {
 }
 
 async function streamVideo(req, res) {
-  const job = jobs.get(req.params.id);
-  if (job && String(job.userId) === String(req.user.id) && job.finalPath) {
-    try {
-      const stat = await fs.stat(job.finalPath);
-      const total = stat.size;
-      res.setHeader("Content-Type", "video/mp4");
-      res.setHeader("Content-Disposition", "inline; filename=shortspark-short.mp4");
-      res.setHeader("Accept-Ranges", "bytes");
-      res.setHeader("Cache-Control", "private, no-store, max-age=0");
-      res.setHeader("X-Content-Type-Options", "nosniff");
-      if (req.method === "HEAD") return res.status(200).end();
-      const range = req.headers.range;
-      if (!range) { res.setHeader("Content-Length", total); return fs.createReadStream(job.finalPath).pipe(res); }
-      const match = /^bytes=(\d*)-(\d*)$/.exec(range);
-      if (!match) { res.setHeader("Content-Range", `bytes */${total}`); return res.status(416).end(); }
-      let start = match[1] ? Number(match[1]) : Math.max(0, total - Number(match[2] || 1));
-      let end = match[2] ? Number(match[2]) : total - 1;
-      if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || start >= total) { res.setHeader("Content-Range", `bytes */${total}`); return res.status(416).end(); }
-      end = Math.min(end, total - 1);
-      res.status(206); res.setHeader("Content-Range", `bytes ${start}-${end}/${total}`); res.setHeader("Content-Length", end-start+1);
-      return fs.createReadStream(job.finalPath, { start, end }).pipe(res);
-    } catch (err) { console.warn("Local video file unavailable; trying database copy", err.message); }
-  }
   try {
     requireDb();
-    const row = (await db.query("SELECT user_id, status, video_data FROM video_generations WHERE job_id=$1 AND user_id=$2", [req.params.id, req.user.id])).rows[0];
-    if (!row || row.status !== "completed" || !row.video_data) return res.status(404).send("Video not found.");
-    return sendVideoBuffer(req, res, row.video_data);
-  } catch (err) {
-    console.error("Persistent video stream error", err);
-    return res.status(500).send("Video could not be loaded.");
-  }
+    const row = (await db.query("SELECT storage_path FROM video_generations WHERE job_id=$1 AND user_id=$2 AND status='completed'", [req.params.id, req.user.id])).rows[0];
+    if (!row?.storage_path) return res.status(404).send("Video not found.");
+    const url = await createCloudSignedUrl(row.storage_path, 900);
+    if (!url) return res.status(503).send("Cloud storage is not configured.");
+    return res.redirect(302, url);
+  } catch (err) { console.error("Video stream error:", err); return res.status(500).send("Could not open video."); }
 }
-app.head("/api/generated-video/:id", requireUser, streamVideo);
-app.get("/api/generated-video/:id", requireUser, streamVideo);
-app.get("/api/video-debug/:id", requireUser, async (req, res) => {
-  const job = jobs.get(req.params.id);
-  const info = { status: job?.status || "unknown", hasFinalPath: !!job?.finalPath, localFile: false, persistentCopy: false };
-  if (job?.finalPath) { try { const stat=await fs.stat(job.finalPath); info.localFile=true; info.size=stat.size; } catch (e) { info.fileError="Local final file is unavailable."; } }
+
+app.get("/api/my-shorts", requireUser, async (req, res) => {
   try {
     requireDb();
-    const row=(await db.query("SELECT status, octet_length(video_data) AS video_bytes, (captions_text IS NOT NULL) AS has_captions FROM video_generations WHERE job_id=$1 AND user_id=$2",[req.params.id,req.user.id])).rows[0];
-    if(row){info.status=row.status;info.persistentCopy=Number(row.video_bytes||0)>0;info.persistentBytes=Number(row.video_bytes||0);info.hasCaptions=!!row.has_captions;}
-  } catch (e) { info.databaseError="Database lookup failed."; }
-  res.json(info);
+    const rows = (await db.query(`SELECT job_id, idea, style, aspect_ratio, duration_seconds, status, created_at, completed_at, storage_path, captions_text FROM video_generations WHERE user_id=$1 ORDER BY created_at DESC LIMIT 50`, [req.user.id])).rows;
+    const shorts = [];
+    for (const row of rows) {
+      if (row.status !== "completed" || !row.storage_path) continue;
+      shorts.push({ id: row.job_id, idea: row.idea, style: row.style, aspectRatio: row.aspect_ratio, durationSeconds: row.duration_seconds, createdAt: row.created_at, videoUrl: `/api/generated-video/${row.job_id}`, captionsUrl: `/api/generated-captions/${row.job_id}` });
+    }
+    res.json({ shorts });
+  } catch (err) { console.error("My Shorts error:", err); res.status(500).json({ error: "Could not load your Shorts." }); }
 });
+
 app.get("/api/generated-captions/:id", requireUser, async (req, res) => {
   const job = jobs.get(req.params.id);
   if (job && String(job.userId) === String(req.user.id) && job.captionsPath) { try { return res.type("text/plain").sendFile(job.captionsPath); } catch {} }
@@ -1251,6 +1272,7 @@ setInterval(async () => {
   if (db) { try { await db.query("DELETE FROM sessions WHERE expires_at<NOW()") } catch {} }
 }, 10 * 60 * 1000).unref();
 
+app.get("/my-shorts", (req, res) => res.sendFile(path.join(__dirname, "my-shorts.html")));
 app.get("/support", (req, res) => res.sendFile(path.join(__dirname, "support.html")));
 app.get("/admin", (req, res) => res.sendFile(path.join(__dirname, "admin.html")));
 app.get("/recommendations", (req, res) => res.sendFile(path.join(__dirname, "recommendations.html")));
