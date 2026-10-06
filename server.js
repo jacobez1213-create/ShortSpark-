@@ -2,6 +2,7 @@ import express from "express";
 import Stripe from "stripe";
 import OpenAI from "openai";
 import Replicate from "replicate";
+import { Readable } from "node:stream";
 import ffmpegPath from "ffmpeg-static";
 import { Pool } from "pg";
 import crypto from "node:crypto";
@@ -41,8 +42,9 @@ Keep answers concise, friendly, and practical. For technical problems, give one 
 If a user asks for a cancellation/refund, explain that they should use their Stripe customer portal when available or contact the business owner; do not pretend to issue the refund yourself.`;
 
 const replicate = process.env.REPLICATE_API_TOKEN ? new Replicate({ auth: process.env.REPLICATE_API_TOKEN }) : null;
-const SUPABASE_URL = String(process.env.SUPABASE_URL || '').replace(/\/$/, '');
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY || '';
+const SUPABASE_URL = String(process.env.SUPABASE_URL || 'https://qqchsmycadubswmwtoem.supabase.co').replace(/\/$/, '');
+// Server-only Supabase Secret key. Accept several env names to make hosting setup less confusing.
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_KEY || '';
 const SUPABASE_STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET || 'shortspark-videos';
 const cloudStorage = !!(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
 const priceIds = { creator: process.env.STRIPE_PRICE_CREATOR, pro: process.env.STRIPE_PRICE_PRO };
@@ -583,7 +585,7 @@ async function ensureCloudStorageBucket() {
     throw new Error("Cloud storage configuration error: SUPABASE_URL must be your Supabase Project URL, such as https://YOUR_PROJECT.supabase.co.");
   }
   if (/^sb_publishable_/i.test(SUPABASE_SERVICE_ROLE_KEY)) {
-    throw new Error("Cloud storage configuration error: you entered the Supabase publishable key. Use the Secret key (sb_secret_...) on the server instead.");
+    throw new Error("Cloud storage configuration error: this is the Supabase publishable key. In Supabase go to Settings → API Keys → Secret keys → default, copy the sb_secret_... value, and put it in SUPABASE_SERVICE_ROLE_KEY on your server.");
   }
   if (!/^sb_secret_/i.test(SUPABASE_SERVICE_ROLE_KEY) && !/^eyJ/i.test(SUPABASE_SERVICE_ROLE_KEY)) {
     console.warn("Supabase key does not look like a current sb_secret_ key; continuing so Supabase can return the exact authentication error.");
@@ -650,7 +652,13 @@ async function createCloudSignedUrl(storagePath, expiresIn = 3600) {
   });
   if (!response.ok) throw new Error(`Cloud storage signed URL failed (${response.status}).`);
   const data = await response.json();
-  return `${SUPABASE_URL}/storage/v1${data.signedURL}`;
+  const signed = String(data.signedURL || data.signedUrl || data.url || '').trim();
+  if (!signed) throw new Error("Cloud storage signed URL response did not include a URL.");
+  // Supabase may return either a relative path or an absolute URL.
+  if (/^https?:\/\//i.test(signed)) return signed;
+  if (signed.startsWith('/storage/v1/')) return `${SUPABASE_URL}${signed}`;
+  if (signed.startsWith('/')) return `${SUPABASE_URL}/storage/v1${signed}`;
+  return `${SUPABASE_URL}/storage/v1/${signed}`;
 }
 
 async function deleteCloudObject(storagePath) {
@@ -1285,7 +1293,22 @@ async function streamVideo(req, res) {
     if (!row?.storage_path) return res.status(404).send("Video not found.");
     const url = await createCloudSignedUrl(row.storage_path, 900);
     if (!url) return res.status(503).send("Cloud storage is not configured.");
-    return res.redirect(302, url);
+    // Proxy the private object instead of redirecting the browser. This keeps the
+    // service-role key server-side and guarantees the app receives video/mp4.
+    const upstream = await fetch(url, { headers: req.headers.range ? { Range: req.headers.range } : {} });
+    if (!upstream.ok) {
+      const body = await upstream.text().catch(() => "");
+      throw new Error(`Cloud video fetch failed (${upstream.status})${body ? `: ${body.slice(0, 400)}` : ""}`);
+    }
+    const contentType = upstream.headers.get("content-type") || "video/mp4";
+    res.status(upstream.status);
+    res.setHeader("Content-Type", contentType.includes("video/") ? contentType : "video/mp4");
+    for (const name of ["content-length", "content-range", "accept-ranges", "cache-control", "etag", "last-modified"]) {
+      const value = upstream.headers.get(name);
+      if (value) res.setHeader(name, value);
+    }
+    if (upstream.body) return Readable.fromWeb(upstream.body).pipe(res);
+    return res.end(Buffer.from(await upstream.arrayBuffer()));
   } catch (err) { console.error("Video stream error:", err); return res.status(500).send("Could not open video."); }
 }
 
