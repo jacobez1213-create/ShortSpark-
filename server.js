@@ -555,9 +555,9 @@ async function generateNarration(text, emotion = "excited", voiceDirection = "")
     voice_id: TTS_VOICE_ID,
     sample_rate: 48000,
     audio_format: "mp3",
-    // Replicate/Inworld accepts speaking_rate from 0 to 1.5.
-    // Keep emotion-based pacing subtle so expressive voices do not exceed the API limit.
-    speaking_rate: emotion === "calm" ? 0 : emotion === "excited" ? 0.2 : 0
+    // Inworld requires speaking_rate to be between 0.5 and 1.5.
+    // Keep emotion-based pacing inside the provider's valid range.
+    speaking_rate: emotion === "calm" ? 0.8 : emotion === "excited" ? 1.2 : 1.0
   }});
   return outputUrl(out);
 }
