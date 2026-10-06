@@ -773,6 +773,74 @@ app.use(helmet({
   crossOriginResourcePolicy: { policy: "same-origin" }
 }));
 app.use(express.json({ limit: "32kb" }));
+
+// Video delivery routes are intentionally registered BEFORE static/catch-all routes.
+// The frontend uses /api/video-file/:id so a SPA fallback can never turn a video
+// request into index.html. /api/generated-video/:id remains as a backwards-compatible alias.
+async function sendVideoBuffer(req, res, buffer) {
+  const total = buffer.length;
+  res.setHeader("Content-Type", "video/mp4");
+  res.setHeader("Content-Disposition", "inline; filename=shortspark-short.mp4");
+  res.setHeader("Accept-Ranges", "bytes");
+  res.setHeader("Cache-Control", "private, no-store, max-age=0");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  if (req.method === "HEAD") return res.status(200).end();
+  const range = req.headers.range;
+  if (!range) { res.setHeader("Content-Length", total); return res.end(buffer); }
+  const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+  if (!match) { res.setHeader("Content-Range", `bytes */${total}`); return res.status(416).end(); }
+  let start = match[1] ? Number(match[1]) : Math.max(0, total - Number(match[2] || 1));
+  let end = match[2] ? Number(match[2]) : total - 1;
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || start >= total) {
+    res.setHeader("Content-Range", `bytes */${total}`); return res.status(416).end();
+  }
+  end = Math.min(end, total - 1);
+  const chunk = buffer.subarray(start, end + 1);
+  res.status(206);
+  res.setHeader("Content-Range", `bytes ${start}-${end}/${total}`);
+  res.setHeader("Content-Length", chunk.length);
+  return res.end(chunk);
+}
+
+async function streamVideo(req, res) {
+  try {
+    requireDb();
+    const row = (await db.query(
+      "SELECT storage_path FROM video_generations WHERE job_id=$1 AND user_id=$2 AND status='completed'",
+      [req.params.id, req.user.id]
+    )).rows[0];
+    if (!row?.storage_path) return res.status(404).json({ error: "Video not found." });
+    const url = await createCloudSignedUrl(row.storage_path, 900);
+    if (!url) return res.status(503).json({ error: "Cloud storage is not configured." });
+    const upstream = await fetch(url, { headers: req.headers.range ? { Range: req.headers.range } : {} });
+    if (!upstream.ok) {
+      const body = await upstream.text().catch(() => "");
+      console.error("Supabase video fetch failed", upstream.status, body.slice(0, 500));
+      return res.status(502).json({ error: `Cloud video fetch failed (${upstream.status}).` });
+    }
+    res.status(upstream.status);
+    // Always advertise the final response as MP4. Supabase may omit or vary this header.
+    res.setHeader("Content-Type", "video/mp4");
+    res.setHeader("Content-Disposition", "inline; filename=shortspark-short.mp4");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    for (const name of ["content-length", "content-range", "accept-ranges", "cache-control", "etag", "last-modified"]) {
+      const value = upstream.headers.get(name);
+      if (value) res.setHeader(name, value);
+    }
+    if (upstream.body) return Readable.fromWeb(upstream.body).pipe(res);
+    return res.end(Buffer.from(await upstream.arrayBuffer()));
+  } catch (err) {
+    console.error("Video stream error:", err);
+    return res.status(500).json({ error: "Could not open video." });
+  }
+}
+
+app.get("/api/video-file/:id", requireUser, streamVideo);
+app.head("/api/video-file/:id", requireUser, streamVideo);
+// Backwards-compatible alias for older saved jobs/bookmarks.
+app.get("/api/generated-video/:id", requireUser, streamVideo);
+app.head("/api/generated-video/:id", requireUser, streamVideo);
+
 app.use(express.static(__dirname, { dotfiles: "deny", index: false }));
 
 app.post("/api/auth/signup", sameOrigin, rateLimit("signup", { windowMs: 15 * 60 * 1000, max: 5 }), async (req, res) => {
@@ -1245,7 +1313,7 @@ app.post("/api/generate-video", sameOrigin, requireUser, rateLimit("video", { wi
 app.get("/api/video-status/:id", requireUser, async (req, res) => {
   const job = jobs.get(req.params.id);
   if (job && String(job.userId) === String(req.user.id)) {
-    if (job.status === "completed") return res.json({ status: "completed", progress: 100, message: job.message, durationSeconds: job.durationSeconds, outputWidth: job.outputWidth, outputHeight: job.outputHeight, videoUrl: `/api/generated-video/${req.params.id}`, captionsUrl: `/api/generated-captions/${req.params.id}` });
+    if (job.status === "completed") return res.json({ status: "completed", progress: 100, message: job.message, durationSeconds: job.durationSeconds, outputWidth: job.outputWidth, outputHeight: job.outputHeight, videoUrl: `/api/video-file/${req.params.id}`, captionsUrl: `/api/generated-captions/${req.params.id}` });
     if (job.status === "failed") return res.status(500).json({ status: "failed", error: job.error || "Video generation failed." });
     return res.json({ status: job.status, progress: job.progress, message: job.message });
   }
@@ -1253,7 +1321,7 @@ app.get("/api/video-status/:id", requireUser, async (req, res) => {
     requireDb();
     const row = (await db.query("SELECT job_id, status, duration_seconds, storage_path, video_data IS NOT NULL AS has_video, captions_text IS NOT NULL AS has_captions, completed_at, error FROM video_generations WHERE job_id=$1 AND user_id=$2", [req.params.id, req.user.id])).rows[0];
     if (!row) return res.status(404).json({ error: "Video job not found." });
-    if (row.status === "completed" && row.storage_path) return res.json({ status: "completed", progress: 100, message: "Your Short is ready.", durationSeconds: row.duration_seconds, videoUrl: `/api/generated-video/${req.params.id}`, captionsUrl: `/api/generated-captions/${req.params.id}` });
+    if (row.status === "completed" && row.storage_path) return res.json({ status: "completed", progress: 100, message: "Your Short is ready.", durationSeconds: row.duration_seconds, videoUrl: `/api/video-file/${req.params.id}`, captionsUrl: `/api/generated-captions/${req.params.id}` });
     if (row.status === "failed") return res.status(500).json({ status: "failed", error: row.error || "Video generation failed." });
     return res.json({ status: row.status, progress: row.status === "generating" ? 55 : 5, message: row.status === "generating" ? "Generating…" : "Queued…" });
   } catch (err) {
@@ -1261,57 +1329,6 @@ app.get("/api/video-status/:id", requireUser, async (req, res) => {
     return res.status(500).json({ error: "Video status is temporarily unavailable." });
   }
 });
-async function sendVideoBuffer(req, res, buffer) {
-  const total = buffer.length;
-  res.setHeader("Content-Type", "video/mp4");
-  res.setHeader("Content-Disposition", "inline; filename=shortspark-short.mp4");
-  res.setHeader("Accept-Ranges", "bytes");
-  res.setHeader("Cache-Control", "private, no-store, max-age=0");
-  res.setHeader("X-Content-Type-Options", "nosniff");
-  if (req.method === "HEAD") return res.status(200).end();
-  const range = req.headers.range;
-  if (!range) { res.setHeader("Content-Length", total); return res.end(buffer); }
-  const match = /^bytes=(\d*)-(\d*)$/.exec(range);
-  if (!match) { res.setHeader("Content-Range", `bytes */${total}`); return res.status(416).end(); }
-  let start = match[1] ? Number(match[1]) : Math.max(0, total - Number(match[2] || 1));
-  let end = match[2] ? Number(match[2]) : total - 1;
-  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || start >= total) {
-    res.setHeader("Content-Range", `bytes */${total}`); return res.status(416).end();
-  }
-  end = Math.min(end, total - 1);
-  const chunk = buffer.subarray(start, end + 1);
-  res.status(206);
-  res.setHeader("Content-Range", `bytes ${start}-${end}/${total}`);
-  res.setHeader("Content-Length", chunk.length);
-  return res.end(chunk);
-}
-
-async function streamVideo(req, res) {
-  try {
-    requireDb();
-    const row = (await db.query("SELECT storage_path FROM video_generations WHERE job_id=$1 AND user_id=$2 AND status='completed'", [req.params.id, req.user.id])).rows[0];
-    if (!row?.storage_path) return res.status(404).send("Video not found.");
-    const url = await createCloudSignedUrl(row.storage_path, 900);
-    if (!url) return res.status(503).send("Cloud storage is not configured.");
-    // Proxy the private object instead of redirecting the browser. This keeps the
-    // service-role key server-side and guarantees the app receives video/mp4.
-    const upstream = await fetch(url, { headers: req.headers.range ? { Range: req.headers.range } : {} });
-    if (!upstream.ok) {
-      const body = await upstream.text().catch(() => "");
-      throw new Error(`Cloud video fetch failed (${upstream.status})${body ? `: ${body.slice(0, 400)}` : ""}`);
-    }
-    const contentType = upstream.headers.get("content-type") || "video/mp4";
-    res.status(upstream.status);
-    res.setHeader("Content-Type", contentType.includes("video/") ? contentType : "video/mp4");
-    for (const name of ["content-length", "content-range", "accept-ranges", "cache-control", "etag", "last-modified"]) {
-      const value = upstream.headers.get(name);
-      if (value) res.setHeader(name, value);
-    }
-    if (upstream.body) return Readable.fromWeb(upstream.body).pipe(res);
-    return res.end(Buffer.from(await upstream.arrayBuffer()));
-  } catch (err) { console.error("Video stream error:", err); return res.status(500).send("Could not open video."); }
-}
-
 app.get("/api/my-shorts", requireUser, async (req, res) => {
   try {
     requireDb();
@@ -1319,7 +1336,7 @@ app.get("/api/my-shorts", requireUser, async (req, res) => {
     const shorts = [];
     for (const row of rows) {
       if (row.status !== "completed" || !row.storage_path) continue;
-      shorts.push({ id: row.job_id, idea: row.idea, style: row.style, aspectRatio: row.aspect_ratio, durationSeconds: row.duration_seconds, createdAt: row.created_at, videoUrl: `/api/generated-video/${row.job_id}`, captionsUrl: `/api/generated-captions/${row.job_id}` });
+      shorts.push({ id: row.job_id, idea: row.idea, style: row.style, aspectRatio: row.aspect_ratio, durationSeconds: row.duration_seconds, createdAt: row.created_at, videoUrl: `/api/video-file/${row.job_id}`, captionsUrl: `/api/generated-captions/${row.job_id}` });
     }
     res.json({ shorts });
   } catch (err) { console.error("My Shorts error:", err); res.status(500).json({ error: "Could not load your Shorts." }); }
